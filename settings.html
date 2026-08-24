@@ -39,6 +39,9 @@
                 <input id="sd_minimal_prompt_processing" type="checkbox" />
                 <span data-i18n="sd_minimal_prompt_processing_txt">Minimal response prompt processing</span>
             </label>
+            <label for="sd_prompt_generation_profile" data-i18n="Prompt generation connection profile">Prompt generation connection profile</label>
+            <select id="sd_prompt_generation_profile" class="text_pole"></select>
+            <small data-i18n="sd_prompt_generation_profile_small">Connection profile always used to generate image-prompt text with full chat context, then the previous profile is restored. Leave empty to use the active chat model.</small>
             <hr>
             <h4 data-i18n="Provider Fallback Chain">Provider Fallback Chain</h4>
             <small data-i18n="sd_settings_presets_small">Save the current backend/connection settings (source, model, sampler, dimensions, etc.) as named presets and arrange them into an ordered chain. Prompt templates, styles, custom entries, and the reference image library are not included.</small>

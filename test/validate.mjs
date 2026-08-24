@@ -6,13 +6,14 @@ for (const file of [manifest.js, manifest.css, 'settings.html', 'button.html', '
 
 const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
 const settings = fs.readFileSync(new URL('../settings.html', import.meta.url), 'utf8');
-for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 'renderRunpodModels', 'renderCustomEntriesList', 'STImageGenerationHooks?.generatePrompt']) {
+for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 'renderRunpodModels', 'renderCustomEntriesList', 'withConnectionProfile', 'CONNECTION_PROFILE_TEMPORARY_STARTED', 'LEGACY_IMAGE_PROMPT_PROFILE_MODULE', 'rememberImagePromptBeforeEdit', 'onImagePromptMessageEdited', 'sd_prompt_override', 'IMAGE_SWIPED']) {
     assert.ok(source.includes(marker), `missing custom image feature: ${marker}`);
 }
-for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_custom_entry_add']) {
+for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_custom_entry_add', 'sd_prompt_generation_profile']) {
     assert.ok(settings.includes(marker), `missing custom image setting: ${marker}`);
 }
 assert.ok(source.includes("third-party/ST-ImageProviderExtensions/comfyWorkflowEditor.html"));
 assert.ok(source.includes("renderExtensionTemplateAsync('third-party/ST-ImageProviderExtensions'"));
 assert.ok(!source.includes("renderExtensionTemplateAsync('stable-diffusion'"));
-assert.ok(!settings.includes('sd_prompt_generation_profile'), 'profile UI belongs to ST-ImagePromptProfiles');
+assert.ok(manifest.dependencies.includes('connection-manager'));
+assert.ok(!source.includes('STImageGenerationHooks?.generatePrompt'), 'companion hook should be fully consolidated');

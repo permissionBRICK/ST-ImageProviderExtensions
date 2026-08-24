@@ -7,9 +7,10 @@ Included features:
 - Ordered provider fallback across every image backend supported by SillyTavern.
 - RunPod on-demand pod status, warm-up, shutdown, copy-URL, model catalog, and chat-bar status control.
 - Tagged reference-image library with automatic LLM selection and `%reference_image%` ComfyUI workflow injection.
+- Editable generated-image prompts: edit the image message, then swipe right to generate from the revised prompt.
 - Per-workflow model, VAE, and LoRA memory plus configurable LoRA strength.
 - Custom image-wand entries and the extended image-generation settings UI.
-- Companion hook for routing image-prompt generation through ST-ImagePromptProfiles.
+- Integrated Connection Manager profile selection for routing image-prompt generation through a cheaper LLM while preserving full chat context, then restoring the chat profile.
 
 Save complete image-provider configurations—OpenRouter, xAI, OpenAI, ComfyUI, Stable Diffusion WebUI, and the other providers supported by SillyTavern—then order them from preferred to last resort. If one request is unavailable, rejected by provider guidelines, or otherwise fails, the same prompt is tried against the next entry. Live settings are restored after every chain run.
 
@@ -26,9 +27,11 @@ https://github.com/permissionBRICK/ST-ImageProviderExtensions
 
 Existing `extension_settings.sd` settings are reused. Legacy Primary/Secondary fallback settings are migrated automatically.
 
-## Optional companion
+If `ST-ImagePromptProfiles` was previously installed, its selected profile is migrated automatically. Disable or uninstall that extension after updating to 2.0.0; it is no longer needed.
 
-[ST-ImagePromptProfiles](https://github.com/permissionBRICK/ST-ImagePromptProfiles) can route the LLM step that writes the image prompt through a cheaper Connection Manager profile. This replacement exposes a narrow hook for that companion; no other core patch is required.
+## Image-prompt cost routing
+
+Choose **Prompt generation connection profile** inside Image Generation to use a less expensive LLM for the text-to-image prompt step. The request still uses SillyTavern's chat-aware generation pipeline and full context. The extension temporarily activates that profile, waits for it to connect, generates the prompt, and restores the chat's prior profile. Leave the selector empty to use the active chat model.
 
 ## Compatibility and provenance
 

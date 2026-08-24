@@ -10,6 +10,7 @@ import {
     getCurrentChatId,
     getRequestHeaders,
     getUserAvatar,
+    online_status,
     saveSettingsDebounced,
     substituteParams,
     substituteParamsExtended,
@@ -40,11 +41,12 @@ import {
     resetScrollHeight,
     saveBase64AsFile,
     stringFormat,
+    waitUntilCondition,
 } from '../../../utils.js';
 import { getMessageTimeStamp, humanizedDateTime } from '../../../RossAscends-mods.js';
 import { SECRET_KEYS, secret_state } from '../../../secrets.js';
 import { getNovelAnlas, getNovelUnlimitedImageGeneration, loadNovelSubscriptionData } from '../../../nai-settings.js';
-import { getMultimodalCaption } from '../../shared.js';
+import { ConnectionManagerRequestService, getMultimodalCaption } from '../../shared.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import {
@@ -67,6 +69,7 @@ import { ActionLoaderHandle, loader } from '/scripts/action-loader.js';
 export { MODULE_NAME };
 
 const MODULE_NAME = 'sd';
+const LEGACY_IMAGE_PROMPT_PROFILE_MODULE = 'ST-ImagePromptProfiles';
 // This is a 1x1 transparent PNG
 const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
@@ -388,6 +391,9 @@ const defaultSettings = {
     // part of preset snapshots, so each chain provider keeps its own map.
     comfy_workflow_prefs: {},
 
+    // Dedicated LLM connection profile for image-prompt generation ('' = use active model)
+    prompt_generation_profile: '',
+
     // User-defined custom wand dropdown entries ({ id, title, prompt })
     custom_entries: [],
 };
@@ -406,6 +412,9 @@ const PRESET_EXCLUDE_KEYS = [
     'ref_images',
     'runpod_lazy_url',
     'runpod_models',
+    // The image-prompt LLM profile is independent of the image backend, so it must
+    // never be captured/swapped by image-generation presets or fallback retries.
+    'prompt_generation_profile',
     'prompts',
     'character_prompts',
     'character_negative_prompts',
@@ -629,6 +638,30 @@ function toggleSourceControls() {
     });
 }
 
+let promptGenerationProfileDropdownInitialized = false;
+let promptProfileWarnedNoBaseProfile = false;
+
+/** Populates the integrated image-prompt Connection Manager profile selector once. */
+function initPromptGenerationProfileDropdown() {
+    if (promptGenerationProfileDropdownInitialized) {
+        return;
+    }
+
+    try {
+        ConnectionManagerRequestService.handleDropdown(
+            '#sd_prompt_generation_profile',
+            extension_settings.sd.prompt_generation_profile,
+            profile => {
+                extension_settings.sd.prompt_generation_profile = profile?.id ?? '';
+                saveSettingsDebounced();
+            },
+        );
+        promptGenerationProfileDropdownInitialized = true;
+    } catch (error) {
+        console.warn('SD: could not populate prompt-generation profile dropdown', error);
+    }
+}
+
 async function loadSettings() {
     // Initialize settings
     if (Object.keys(extension_settings.sd).length === 0) {
@@ -640,6 +673,15 @@ async function loadSettings() {
         if (extension_settings.sd[key] === undefined) {
             extension_settings.sd[key] = value;
         }
+    }
+
+    // ST-ImagePromptProfiles 1.x stored the selection under its own module key.
+    // Import it once when the integrated setting is still empty so consolidation
+    // does not silently reset an existing NAS or regular extension installation.
+    const legacyProfileId = extension_settings[LEGACY_IMAGE_PROMPT_PROFILE_MODULE]?.profileId;
+    if (!extension_settings.sd.prompt_generation_profile && typeof legacyProfileId === 'string' && legacyProfileId) {
+        extension_settings.sd.prompt_generation_profile = legacyProfileId;
+        saveSettingsDebounced();
     }
 
     if (extension_settings.sd.prompts === undefined) {
@@ -807,6 +849,8 @@ async function loadSettings() {
 
     const resolutionId = getClosestKnownResolution();
     $('#sd_resolution').val(resolutionId);
+
+    initPromptGenerationProfileDropdown();
 
     toggleSourceControls();
     addPromptTemplates();
@@ -1418,19 +1462,6 @@ function extractReferenceSelection(reply, candidates) {
 }
 
 /**
- * Runs an image-prompt LLM request through an optional companion extension hook.
- * ST-ImagePromptProfiles uses this hook to switch profiles and always calls the
- * supplied fallback while the selected profile is active.
- * @param {string} quietPrompt Prompt for the chat-aware quiet generation.
- * @returns {Promise<string>} Raw LLM reply.
- */
-async function generateImagePromptQuiet(quietPrompt) {
-    const fallback = () => generateQuietPrompt({ quietPrompt });
-    const hook = globalThis.STImageGenerationHooks?.generatePrompt;
-    return typeof hook === 'function' ? await hook({ quietPrompt, fallback }) : await fallback();
-}
-
-/**
  * Asks the image-prompt LLM to pick the best-fitting reference image for a scene
  * in a dedicated (second) request.
  * @param {string} prompt The final image prompt describing the scene.
@@ -1448,7 +1479,10 @@ async function selectReferenceImageWithLlm(prompt, candidates) {
         '',
         'Reply with ONLY the tag of the chosen reference image and nothing else.',
     ].join('\n');
-    const reply = await generateImagePromptQuiet(quietPrompt);
+    const profileId = extension_settings.sd.prompt_generation_profile;
+    const reply = profileId
+        ? await withConnectionProfile(profileId, () => generateQuietPrompt({ quietPrompt }))
+        : await generateQuietPrompt({ quietPrompt });
     return matchReferenceTag(String(reply ?? '').trim(), candidates);
 }
 
@@ -4602,6 +4636,7 @@ function getUserAvatarUrl() {
  */
 async function generatePrompt(quietPrompt) {
     const toast = toastr.info('Generating image prompt with an LLM...', 'Image Generation');
+    const profileId = extension_settings.sd.prompt_generation_profile;
     let reply;
 
     // When the workflow uses a reference image and there is more than one to choose
@@ -4616,7 +4651,9 @@ async function generatePrompt(quietPrompt) {
         : quietPrompt;
 
     try {
-        reply = await generateImagePromptQuiet(effectiveQuietPrompt);
+        reply = profileId
+            ? await withConnectionProfile(profileId, () => generateQuietPrompt({ quietPrompt: effectiveQuietPrompt }))
+            : await generateQuietPrompt({ quietPrompt: effectiveQuietPrompt });
     } finally {
         toastr.clear(toast);
     }
@@ -4637,6 +4674,59 @@ async function generatePrompt(quietPrompt) {
     }
 
     return processedReply;
+}
+
+/**
+ * Runs work with a Connection Manager profile temporarily active, then restores
+ * the chat's previous profile. If no real base profile is active, switching would
+ * be unsafe to undo, so the active model is used and the user is warned once.
+ * @param {string} targetProfileId Profile to activate for the callback.
+ * @param {() => Promise<any>} callback Work to run while it is active.
+ * @returns {Promise<any>} Callback result.
+ */
+async function withConnectionProfile(targetProfileId, callback) {
+    const select = /** @type {HTMLSelectElement} */ (document.getElementById('connection_profiles'));
+    const connectionManager = extension_settings.connectionManager;
+    const currentProfileId = connectionManager?.selectedProfile;
+
+    const canSwitch = !!select
+        && !!connectionManager
+        && Array.isArray(connectionManager.profiles)
+        && connectionManager.profiles.some(profile => profile.id === targetProfileId)
+        && Array.from(select.options).some(option => option.value === targetProfileId)
+        && !!currentProfileId
+        && currentProfileId !== targetProfileId;
+
+    if (!canSwitch) {
+        if (targetProfileId && !currentProfileId && !promptProfileWarnedNoBaseProfile) {
+            promptProfileWarnedNoBaseProfile = true;
+            toastr.info('The image-prompt LLM profile is only applied while a connection profile is active (so the original can be restored). Using the current model.', 'Image Generation');
+        }
+        return await callback();
+    }
+
+    const switchToProfile = async profileId => {
+        const loaded = new Promise(resolve => eventSource.once(event_types.CONNECTION_PROFILE_LOADED, resolve));
+        const index = Array.from(select.options).findIndex(option => option.value === profileId);
+        select.selectedIndex = index >= 0 ? index : 0;
+        select.dispatchEvent(new Event('change'));
+        await Promise.race([loaded, delay(10000)]);
+        await waitUntilCondition(() => online_status !== 'no_connection', 10000, 100, { rejectOnTimeout: false });
+    };
+
+    await eventSource.emit(event_types.CONNECTION_PROFILE_TEMPORARY_STARTED);
+    try {
+        await switchToProfile(targetProfileId);
+        return await callback();
+    } finally {
+        try {
+            await switchToProfile(currentProfileId);
+        } catch (error) {
+            console.error('SD: failed to restore the previous connection profile after image-prompt generation', error);
+        } finally {
+            await eventSource.emit(event_types.CONNECTION_PROFILE_TEMPORARY_ENDED);
+        }
+    }
 }
 
 /**
