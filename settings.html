@@ -40,18 +40,73 @@
                 <span data-i18n="sd_minimal_prompt_processing_txt">Minimal response prompt processing</span>
             </label>
             <hr>
-            <h4>Provider fallback chain</h4>
-            <small>Save complete image-provider configurations and order them from first choice to last resort. Prompt templates, styles, and visibility preferences are not included.</small>
+            <h4 data-i18n="Provider Fallback Chain">Provider Fallback Chain</h4>
+            <small data-i18n="sd_settings_presets_small">Save the current backend/connection settings (source, model, sampler, dimensions, etc.) as named presets and arrange them into an ordered chain. Prompt templates, styles, custom entries, and the reference image library are not included.</small>
             <div id="sd_preset_chain_list" class="flex-container flexFlowColumn marginTopBot5"></div>
             <div class="flex-container marginTopBot5">
-                <input id="sd_preset_chain_name" type="text" class="text_pole flex1" placeholder="Provider name" />
-                <div id="sd_preset_chain_add" class="menu_button menu_button_icon"><i class="fa-solid fa-plus"></i><span>Add current settings</span></div>
+                <input id="sd_preset_chain_name" type="text" class="text_pole flex1" placeholder="New preset name" data-i18n="[placeholder]New preset name" />
+                <div id="sd_preset_chain_add" class="menu_button menu_button_icon">
+                    <i class="fa-solid fa-plus"></i>
+                    <span data-i18n="Add current settings">Add current settings</span>
+                </div>
             </div>
-            <label for="sd_fallback_enabled" class="checkbox_label" title="Try each saved provider in order until one returns an image.">
+            <label for="sd_fallback_enabled" class="checkbox_label" data-i18n="[title]sd_fallback_enabled" title="Generate using the chain presets in order: unreachable local servers are skipped after a short probe, and failed attempts fall through to the next preset. Your live settings are restored afterward.">
                 <input id="sd_fallback_enabled" type="checkbox" />
-                <span>Generate through the fallback chain</span>
+                <span data-i18n="sd_fallback_enabled_txt">Generate through the chain (auto-fallback)</span>
             </label>
-            <small>Guideline refusals, unavailable APIs, and other failed requests automatically continue to the next provider.</small>
+            <small data-i18n="sd_fallback_enabled_small">When enabled, each generation tries the chain presets top to bottom until one succeeds. Unreachable local backends (e.g. a powered-off ComfyUI machine) are skipped after about a second.</small>
+            <hr>
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b data-i18n="Reference Image Library">Reference Image Library</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label for="sd_ref_images_enabled" class="checkbox_label" data-i18n="[title]sd_ref_images_enabled" title="When the ComfyUI workflow contains a %reference_image% placeholder, the image-prompt LLM picks the best-fitting image from this library and it is passed to the workflow as Base64.">
+                        <input id="sd_ref_images_enabled" type="checkbox" />
+                        <span data-i18n="sd_ref_images_enabled_txt">Use tagged reference images</span>
+                    </label>
+                    <small data-i18n="sd_ref_images_small">Upload images and tag them with a short name plus a description. If the active ComfyUI workflow uses the &quot;%reference_image%&quot; placeholder, the best-fitting image for the scene is selected automatically and injected like %user_avatar% / %char_avatar%.</small>
+                    <div id="sd_ref_images_list" class="flex-container flexFlowColumn marginTopBot5"></div>
+                    <div class="flex-container marginTopBot5">
+                        <div id="sd_ref_images_add" class="menu_button menu_button_icon">
+                            <i class="fa-solid fa-plus"></i>
+                            <span data-i18n="Add reference image">Add reference image</span>
+                        </div>
+                        <input id="sd_ref_images_file" type="file" accept="image/png, image/jpeg, image/webp" multiple hidden />
+                    </div>
+                </div>
+            </div>
+            <hr>
+            <h4 data-i18n="RunPod On-Demand Pod">RunPod On-Demand Pod</h4>
+            <label for="sd_runpod_lazy_url" data-i18n="Lazy proxy URL">Lazy proxy URL</label>
+            <input id="sd_runpod_lazy_url" type="text" class="text_pole" placeholder="http://203.0.113.4:8189" />
+            <div class="flex-container alignItemsCenter marginTopBot5">
+                <span id="sd_runpod_dot" class="sd_runpod_dot"></span>
+                <span id="sd_runpod_status_text" class="flex1">unknown</span>
+                <div id="sd_runpod_warmup" class="menu_button menu_button_icon" title="Start the pod and pre-download all models" data-i18n="[title]sd_runpod_warmup">
+                    <i class="fa-solid fa-fire"></i>
+                    <span data-i18n="Warm up">Warm up</span>
+                </div>
+                <div id="sd_runpod_shutdown" class="menu_button menu_button_icon" title="Terminate the pod now" data-i18n="[title]sd_runpod_shutdown">
+                    <i class="fa-solid fa-power-off"></i>
+                    <span data-i18n="Shut down">Shut down</span>
+                </div>
+                <div id="sd_runpod_open" class="menu_button menu_button_icon" title="Copy the pod's ComfyUI URL (RunPod blocks clicked cross-site links; paste it into a new tab)" data-i18n="[title]sd_runpod_open" style="display: none;">
+                    <i class="fa-solid fa-copy"></i>
+                    <span data-i18n="Copy ComfyUI URL">Copy ComfyUI URL</span>
+                </div>
+            </div>
+            <small data-i18n="sd_runpod_small">The pod starts only when you press Warm up. A SillyTavern tab sends a heartbeat every 20 seconds; the proxy keeps an already-ready pod alive on its own stable timer and tolerates browser sleep for up to 5 minutes. The pod shuts down 15 minutes after keepalives and other activity stop. Image requests fail over instead of starting a stopped pod. Red = off, orange = starting/downloading models, green = ready.</small>
+            <h5 data-i18n="Model catalog">Model catalog</h5>
+            <small data-i18n="sd_runpod_models_small">When the ComfyUI URL points at the proxy, the Model dropdown lists these entries instead of asking the backend. Press Warm up to apply the selected model and download its files; changing the selection or generating an image never starts or provisions a stopped pod. Filename = what &quot;%model%&quot; resolves to; downloads = one &quot;subpath url&quot; per line, including companion files (text encoder, VAE, LoRA).</small>
+            <div id="sd_runpod_models_list" class="flex-container flexFlowColumn marginTopBot5"></div>
+            <div class="flex-container marginTopBot5">
+                <div id="sd_runpod_models_add" class="menu_button menu_button_icon">
+                    <i class="fa-solid fa-plus"></i>
+                    <span data-i18n="Add model">Add model</span>
+                </div>
+            </div>
             <hr>
             <label for="sd_source" data-i18n="Source">Source</label>
             <select id="sd_source" class="text_pole">
@@ -447,6 +502,21 @@
                     <label for="sd_vae">VAE</label>
                     <select id="sd_vae" class="text_pole"></select>
                 </div>
+
+                <div class="flex1" data-sd-source="comfy">
+                    <label for="sd_lora" data-i18n="LoRA">LoRA</label>
+                    <select id="sd_lora" class="text_pole"></select>
+                </div>
+            </div>
+
+            <div class="flex-container">
+                <div class="alignitemscenter flex-container flexFlowColumn flexGrow flexShrink gap0 flexBasis48p" data-sd-source="comfy">
+                    <small>
+                        <span data-i18n="LoRA strength">LoRA strength</span>
+                    </small>
+                    <input class="neo-range-slider" type="range" id="sd_lora_strength" name="sd_lora_strength" min="{{lora_strength_min}}" max="{{lora_strength_max}}" step="{{lora_strength_step}}" value="{{lora_strength}}" >
+                    <input class="neo-range-input" type="number" id="sd_lora_strength_value" data-for="sd_lora_strength" min="{{lora_strength_min}}" max="{{lora_strength_max}}" step="{{lora_strength_step}}" value="{{lora_strength}}" >
+                </div>
             </div>
 
             <div class="flex-container">
@@ -682,6 +752,22 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div id="sd_prompt_templates" class="inline-drawer-content">
+        </div>
+    </div>
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b data-i18n="Custom Wand Entries">Custom Wand Entries</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <small data-i18n="sd_custom_entries_small">Add your own entries to the image generation wand dropdown. Clicking an entry uses its prompt as the LLM instruction, just like the built-in entries.</small>
+            <div class="flex-container marginTopBot5">
+                <div id="sd_custom_entry_add" class="menu_button menu_button_icon">
+                    <i class="fa-solid fa-plus"></i>
+                    <span data-i18n="Add entry">Add entry</span>
+                </div>
+            </div>
+            <div id="sd_custom_entries_list"></div>
         </div>
     </div>
 </div>

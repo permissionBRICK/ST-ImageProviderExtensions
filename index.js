@@ -125,6 +125,7 @@ const generationMode = {
     USER_MULTIMODAL: 9,
     FACE_MULTIMODAL: 10,
     FREE_EXTENDED: 11,
+    CUSTOM: 12,
 };
 
 const multimodalMap = {
@@ -147,6 +148,7 @@ const modeLabels = {
     [generationMode.FACE_MULTIMODAL]: 'Portrait (Multimodal Mode)',
     [generationMode.USER_MULTIMODAL]: 'User (Multimodal Mode)',
     [generationMode.FREE_EXTENDED]: 'Free Mode (LLM-Extended)',
+    [generationMode.CUSTOM]: 'Custom',
 };
 
 const triggerWords = {
@@ -361,9 +363,33 @@ const defaultSettings = {
     google_enhance: true,
     google_duration: 6,
 
-    // Settings presets & auto-fallback
+    // Settings presets & auto-fallback ({ name, preset } entries, tried in order)
     settings_preset_chain: [],
     settings_fallback_enabled: false,
+
+    // Reference image library ({ tag, description, path } entries)
+    ref_images_enabled: false,
+    ref_images: [],
+
+    // RunPod lazy-pod proxy base URL ('' = feature off)
+    runpod_lazy_url: '',
+
+    // RunPod model catalog ({ name, value, kind: 'model'|'lora', downloads } entries)
+    runpod_models: [],
+
+    // Selected LoRA for comfy workflows using the %lora% placeholder
+    lora: '',
+    lora_strength: 1.0,
+    lora_strength_min: 0.0,
+    lora_strength_max: 2.0,
+    lora_strength_step: 0.01,
+
+    // Per-workflow remembered selections ({ [workflow]: { model, lora } });
+    // part of preset snapshots, so each chain provider keeps its own map.
+    comfy_workflow_prefs: {},
+
+    // User-defined custom wand dropdown entries ({ id, title, prompt })
+    custom_entries: [],
 };
 
 /**
@@ -375,6 +401,11 @@ const defaultSettings = {
 const PRESET_EXCLUDE_KEYS = [
     'settings_preset_chain',
     'settings_fallback_enabled',
+    // The reference image library is global, not a per-backend setting.
+    'ref_images_enabled',
+    'ref_images',
+    'runpod_lazy_url',
+    'runpod_models',
     'prompts',
     'character_prompts',
     'character_negative_prompts',
@@ -411,6 +442,8 @@ function applySdSettingsSnapshot(snapshot) {
         return;
     }
     for (const key of Object.keys(snapshot)) {
+        // Skip excluded keys so presets saved by an older build cannot clobber
+        // settings that are now global rather than provider-specific.
         if (PRESET_EXCLUDE_KEYS.includes(key)) {
             continue;
         }
@@ -427,9 +460,65 @@ function isPresetConfigured(preset) {
     return !!preset && typeof preset === 'object' && Object.keys(preset).length > 0;
 }
 
+/**
+ * Returns the fallback chain entries that hold a usable preset snapshot, in order.
+ * @returns {{name: string, preset: object}[]} Ordered list of configured chain entries.
+ */
 function getConfiguredPresetChain() {
     const chain = Array.isArray(extension_settings.sd.settings_preset_chain) ? extension_settings.sd.settings_preset_chain : [];
     return chain.filter(entry => entry && isPresetConfigured(entry.preset));
+}
+
+/**
+ * How long to wait for a locally-hosted backend's status endpoint before treating
+ * the server as down and moving on to the next entry in the fallback chain.
+ */
+const SOURCE_PROBE_TIMEOUT_MS = 1500;
+
+/**
+ * Quickly checks whether the currently configured source is up. Only locally-hosted
+ * backends with a status endpoint are probed (ComfyUI, A1111, SD.Next, DrawThings,
+ * stable-diffusion.cpp); sources without a probe are assumed reachable.
+ * @returns {Promise<boolean>} False when the backend has a probe and it failed.
+ */
+async function isCurrentSourceReachable() {
+    /**
+     * @param {string} endpoint ST server ping route for the backend.
+     * @param {object} body Request body identifying the backend server.
+     * @returns {Promise<boolean>} Whether the ping succeeded within the timeout.
+     */
+    const probe = async (endpoint, body) => {
+        try {
+            const result = await fetch(endpoint, {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                signal: AbortSignal.timeout(SOURCE_PROBE_TIMEOUT_MS),
+                body: JSON.stringify(body),
+            });
+            return result.ok;
+        } catch {
+            return false;
+        }
+    };
+
+    switch (extension_settings.sd.source) {
+        case sources.comfy:
+            if (extension_settings.sd.comfy_type !== comfyTypes.standard) {
+                return true;
+            }
+            if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+                return isRunpodReady(SOURCE_PROBE_TIMEOUT_MS);
+            }
+            return probe('/api/sd/comfy/ping', { url: extension_settings.sd.comfy_url });
+        case sources.auto:
+        case sources.vlad:
+        case sources.drawthings:
+            return probe(extension_settings.sd.source === sources.drawthings ? '/api/sd/drawthings/ping' : '/api/sd/ping', getSdRequestBody());
+        case sources.sdcpp:
+            return probe('/api/sd/sdcpp/ping', { url: extension_settings.sd.sdcpp_url });
+        default:
+            return true;
+    }
 }
 
 /**
@@ -578,20 +667,60 @@ async function loadSettings() {
 
     // Settings presets & auto-fallback
     if (!Array.isArray(extension_settings.sd.settings_preset_chain)) {
-        const migrated = [];
+        // Migrate the old two-slot primary/secondary presets into a chain.
+        const chain = [];
         if (isPresetConfigured(extension_settings.sd.settings_preset_primary)) {
-            migrated.push({ name: 'Primary', preset: extension_settings.sd.settings_preset_primary });
+            chain.push({ name: 'Primary', preset: extension_settings.sd.settings_preset_primary });
         }
         if (isPresetConfigured(extension_settings.sd.settings_preset_secondary)) {
-            migrated.push({ name: 'Secondary', preset: extension_settings.sd.settings_preset_secondary });
+            chain.push({ name: 'Secondary', preset: extension_settings.sd.settings_preset_secondary });
         }
-        extension_settings.sd.settings_preset_chain = migrated;
+        extension_settings.sd.settings_preset_chain = chain;
         delete extension_settings.sd.settings_preset_primary;
         delete extension_settings.sd.settings_preset_secondary;
     }
 
     if (extension_settings.sd.settings_fallback_enabled === undefined) {
         extension_settings.sd.settings_fallback_enabled = false;
+    }
+
+    // Reference image library
+    if (extension_settings.sd.ref_images_enabled === undefined) {
+        extension_settings.sd.ref_images_enabled = false;
+    }
+
+    if (!Array.isArray(extension_settings.sd.ref_images)) {
+        extension_settings.sd.ref_images = [];
+    }
+
+    if (!Array.isArray(extension_settings.sd.runpod_models)) {
+        extension_settings.sd.runpod_models = [];
+    }
+
+    if (extension_settings.sd.lora === undefined) {
+        extension_settings.sd.lora = '';
+    }
+
+    if (typeof extension_settings.sd.lora_strength !== 'number') {
+        extension_settings.sd.lora_strength = 1.0;
+    }
+
+    // The flux workflows moved from a hardcoded flux2 VAE to %vae%; a leftover
+    // flux1 selection ('ae.safetensors') would fail pod-side validation.
+    const migrateVae = (config) => {
+        if (config && config.vae === 'ae.safetensors') {
+            config.vae = 'flux2-vae.safetensors';
+        }
+    };
+    migrateVae(extension_settings.sd);
+    (extension_settings.sd.settings_preset_chain ?? []).forEach(entry => migrateVae(entry?.preset));
+
+    if (typeof extension_settings.sd.comfy_workflow_prefs !== 'object' || !extension_settings.sd.comfy_workflow_prefs) {
+        extension_settings.sd.comfy_workflow_prefs = {};
+    }
+
+    if (!Array.isArray(extension_settings.sd.custom_entries)) {
+        extension_settings.sd.custom_entries = [];
     }
 
     // Preserve an original seed if exists
@@ -609,6 +738,7 @@ async function loadSettings() {
     $('#sd_height').val(extension_settings.sd.height).trigger('input');
     $('#sd_hr_scale').val(extension_settings.sd.hr_scale).trigger('input');
     $('#sd_denoising_strength').val(extension_settings.sd.denoising_strength).trigger('input');
+    $('#sd_lora_strength').val(extension_settings.sd.lora_strength ?? 1.0).trigger('input');
     $('#sd_hr_second_pass_steps').val(extension_settings.sd.hr_second_pass_steps).trigger('input');
     $('#sd_novel_anlas_guard').prop('checked', extension_settings.sd.novel_anlas_guard);
     $('#sd_novel_sm').prop('checked', extension_settings.sd.novel_sm);
@@ -660,7 +790,12 @@ async function loadSettings() {
     $('#sd_google_enhance').prop('checked', extension_settings.sd.google_enhance);
     $('#sd_google_duration').val(extension_settings.sd.google_duration);
     $('#sd_fallback_enabled').prop('checked', extension_settings.sd.settings_fallback_enabled);
+    $('#sd_ref_images_enabled').prop('checked', extension_settings.sd.ref_images_enabled);
+    $('#sd_runpod_lazy_url').val(extension_settings.sd.runpod_lazy_url ?? '');
     renderPresetChain();
+    renderRefImages();
+    renderRunpodModels();
+    setupRunpodLoops();
 
     for (const style of extension_settings.sd.styles) {
         const option = document.createElement('option');
@@ -675,6 +810,8 @@ async function loadSettings() {
 
     toggleSourceControls();
     addPromptTemplates();
+    renderCustomEntriesList();
+    renderCustomDropdownEntries();
     registerFunctionTool();
 
     await loadSettingOptions();
@@ -712,8 +849,46 @@ async function loadSettingOptions() {
         loadModels(),
         loadSchedulers(),
         loadVaes(),
+        loadLoras(),
         loadComfyWorkflows(),
     ]);
+}
+
+async function loadLoras() {
+    $('#sd_lora').empty();
+    let loras = ['N/A'];
+    if (extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type === comfyTypes.standard) {
+        loras = await loadComfyLoras();
+    }
+    for (const lora of loras) {
+        const option = document.createElement('option');
+        option.innerText = lora?.text ?? lora;
+        option.value = lora?.value ?? lora;
+        option.selected = option.value === extension_settings.sd.lora;
+        $('#sd_lora').append(option);
+    }
+}
+
+async function loadComfyLoras() {
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        return getRunpodCatalog().filter(m => m.kind === 'lora').map(m => ({ value: m.value, text: m.name || m.value }));
+    }
+    if (!extension_settings.sd.comfy_url) {
+        return [];
+    }
+    try {
+        const result = await fetch('/api/sd/comfy/loras', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ url: extension_settings.sd.comfy_url }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        return await result.json();
+    } catch (error) {
+        return [];
+    }
 }
 
 function addPromptTemplates() {
@@ -904,58 +1079,942 @@ async function onRenameStyleClick() {
     saveSettingsDebounced();
 }
 
+/**
+ * Rebuilds the provider fallback chain list in the settings UI.
+ */
 function renderPresetChain() {
-    const container = $('#sd_preset_chain_list').empty();
-    const chain = extension_settings.sd.settings_preset_chain;
-    if (!chain.length) {
-        container.append($('<small>').text('No providers saved yet.'));
+    const container = $('#sd_preset_chain_list');
+    if (!container.length) {
         return;
     }
+
+    container.empty();
+
+    const chain = Array.isArray(extension_settings.sd.settings_preset_chain) ? extension_settings.sd.settings_preset_chain : [];
+
+    if (chain.length === 0) {
+        const empty = $('<small></small>')
+            .attr('data-i18n', 'No presets in the chain yet.')
+            .text('No presets in the chain yet.');
+        container.append(empty);
+        return;
+    }
+
     chain.forEach((entry, index) => {
-        const button = (icon, title, handler) => $('<div>')
+        const orderEl = $('<div></div>').addClass('sd_preset_chain_order').text(`${index + 1}.`);
+        const sourceHint = String(entry.preset?.source ?? '');
+        const nameInput = $('<input>')
+            .addClass('text_pole flex1')
+            .attr('type', 'text')
+            .attr('title', sourceHint ? `Source: ${sourceHint}` : '')
+            .val(entry.name || '')
+            .on('change', function () {
+                entry.name = String($(this).val() ?? '').trim() || `Preset ${index + 1}`;
+                saveSettingsDebounced();
+            });
+
+        const makeButton = (icon, title, handler) => $('<div></div>')
             .addClass(`menu_button menu_button_icon fa-solid ${icon}`)
             .attr('title', title)
+            .attr('data-i18n', `[title]${title}`)
             .on('click', handler);
-        const name = $('<input>').addClass('text_pole flex1').val(entry.name || `Provider ${index + 1}`).on('change', function () {
-            entry.name = String($(this).val()).trim() || `Provider ${index + 1}`;
+
+        const upButton = makeButton('fa-chevron-up', 'Move up', () => {
+            if (index === 0) return;
+            [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]];
             saveSettingsDebounced();
+            renderPresetChain();
         });
-        const row = $('<div>').addClass('flex-container alignItemsCenter marginTopBot5')
-            .append($('<span>').addClass('sd_preset_chain_order').text(`${index + 1}.`), name)
-            .append(button('fa-chevron-up', 'Move up', () => {
-                if (index > 0) [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]];
-                saveSettingsDebounced(); renderPresetChain();
-            }))
-            .append(button('fa-chevron-down', 'Move down', () => {
-                if (index < chain.length - 1) [chain[index + 1], chain[index]] = [chain[index], chain[index + 1]];
-                saveSettingsDebounced(); renderPresetChain();
-            }))
-            .append(button('fa-file-import', 'Load provider settings', async () => {
-                applySdSettingsSnapshot(entry.preset); saveSettingsDebounced(); await refreshSettingsUi();
-            }))
-            .append(button('fa-floppy-disk', 'Overwrite with current settings', () => {
-                entry.preset = snapshotSdSettings(); saveSettingsDebounced(); renderPresetChain();
-            }))
-            .append(button('fa-trash-can', 'Remove', () => {
-                chain.splice(index, 1); saveSettingsDebounced(); renderPresetChain();
-            }));
+        const downButton = makeButton('fa-chevron-down', 'Move down', () => {
+            if (index === chain.length - 1) return;
+            [chain[index + 1], chain[index]] = [chain[index], chain[index + 1]];
+            saveSettingsDebounced();
+            renderPresetChain();
+        });
+        const loadButton = makeButton('fa-file-import', 'Load this preset into the current settings', async () => {
+            applySdSettingsSnapshot(entry.preset);
+            saveSettingsDebounced();
+            await refreshSettingsUi();
+            toastr.success(t`Settings preset loaded.`, t`Image Generation`);
+        });
+        const saveButton = makeButton('fa-floppy-disk', 'Overwrite this preset with the current settings', () => {
+            entry.preset = snapshotSdSettings();
+            saveSettingsDebounced();
+            renderPresetChain();
+            toastr.success(t`Settings preset updated.`, t`Image Generation`);
+        });
+        const deleteButton = makeButton('fa-trash-can', 'Remove from the chain', () => {
+            chain.splice(index, 1);
+            saveSettingsDebounced();
+            renderPresetChain();
+        });
+
+        const row = $('<div></div>')
+            .addClass('flex-container alignItemsCenter marginTopBot5')
+            .append(orderEl)
+            .append(nameInput)
+            .append(upButton)
+            .append(downButton)
+            .append(loadButton)
+            .append(saveButton)
+            .append(deleteButton);
+
         container.append(row);
     });
 }
 
 function onPresetChainAddClick() {
-    const input = $('#sd_preset_chain_name');
+    const nameInput = $('#sd_preset_chain_name');
+    const name = String(nameInput.val() ?? '').trim();
     const chain = extension_settings.sd.settings_preset_chain;
-    const name = String(input.val() || '').trim() || `Provider ${chain.length + 1}`;
-    chain.push({ name, preset: snapshotSdSettings() });
-    input.val('');
+    chain.push({ name: name || `Preset ${chain.length + 1}`, preset: snapshotSdSettings() });
+    nameInput.val('');
     saveSettingsDebounced();
     renderPresetChain();
+    toastr.success(t`Current settings added to the fallback chain.`, t`Image Generation`);
 }
 
 function onFallbackEnabledChange() {
     extension_settings.sd.settings_fallback_enabled = !!$(this).prop('checked');
     saveSettingsDebounced();
+}
+
+// #region Reference image library
+
+/**
+ * Matches the reference image placeholder in a raw ComfyUI workflow ("%reference_image%" or "%reference-image%").
+ */
+const REFERENCE_IMAGE_PLACEHOLDER = /"%reference[-_]image%"/i;
+
+/**
+ * Reference image chosen for the in-flight generation. Set at prompt-generation time
+ * (or lazily by the workflow builder) and read when the ComfyUI workflow is assembled.
+ * Deliberately kept across swipe regenerations so a swipe reuses the same reference.
+ * @type {{tag: string, description: string, path: string} | null}
+ */
+let pendingReferenceImage = null;
+
+/**
+ * Returns library entries that have an uploaded image.
+ * @returns {{tag: string, description: string, path: string}[]} Valid reference images.
+ */
+function getValidRefImages() {
+    const images = Array.isArray(extension_settings.sd.ref_images) ? extension_settings.sd.ref_images : [];
+    return images.filter(image => image && typeof image.path === 'string' && image.path.length > 0);
+}
+
+/**
+ * Rebuilds the reference image library list in the settings UI.
+ */
+function renderRefImages() {
+    const container = $('#sd_ref_images_list');
+    if (!container.length) {
+        return;
+    }
+
+    container.empty();
+
+    const images = Array.isArray(extension_settings.sd.ref_images) ? extension_settings.sd.ref_images : [];
+
+    if (images.length === 0) {
+        const empty = $('<small></small>')
+            .attr('data-i18n', 'No reference images yet.')
+            .text('No reference images yet.');
+        container.append(empty);
+        return;
+    }
+
+    images.forEach((image, index) => {
+        const thumb = $('<img>')
+            .addClass('sd_ref_image_thumb')
+            .attr('src', image.path)
+            .attr('alt', image.tag || '');
+        const tagInput = $('<input>')
+            .addClass('text_pole')
+            .attr('type', 'text')
+            .attr('placeholder', 'Tag')
+            .attr('data-i18n', '[placeholder]Tag')
+            .val(image.tag || '')
+            .on('change', function () {
+                image.tag = String($(this).val() ?? '').trim();
+                saveSettingsDebounced();
+            });
+        const descriptionInput = $('<input>')
+            .addClass('text_pole flex1')
+            .attr('type', 'text')
+            .attr('placeholder', 'Description (used to pick the best fit)')
+            .attr('data-i18n', '[placeholder]Description (used to pick the best fit)')
+            .val(image.description || '')
+            .on('change', function () {
+                image.description = String($(this).val() ?? '').trim();
+                saveSettingsDebounced();
+            });
+        const deleteButton = $('<div></div>')
+            .addClass('menu_button menu_button_icon fa-solid fa-trash-can')
+            .attr('title', 'Remove reference image')
+            .attr('data-i18n', '[title]Remove reference image')
+            .on('click', () => {
+                images.splice(index, 1);
+                saveSettingsDebounced();
+                renderRefImages();
+            });
+
+        const row = $('<div></div>')
+            .addClass('flex-container alignItemsCenter marginTopBot5')
+            .append(thumb)
+            .append(tagInput)
+            .append(descriptionInput)
+            .append(deleteButton);
+
+        container.append(row);
+    });
+}
+
+function onRefImagesEnabledChange() {
+    extension_settings.sd.ref_images_enabled = !!$(this).prop('checked');
+    saveSettingsDebounced();
+}
+
+async function onRefImagesFileChange() {
+    const files = Array.from(this.files ?? []);
+    this.value = '';
+
+    for (const file of files) {
+        try {
+            const dataUrl = await getBase64Async(file);
+            const base64 = String(dataUrl).split(',')[1];
+            const extension = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+            const baseName = file.name.replace(/\.[^/.]+$/, '');
+            const path = await saveBase64AsFile(base64, 'reference-images', baseName, extension);
+            extension_settings.sd.ref_images.push({ tag: baseName, description: '', path });
+        } catch (error) {
+            console.error('SD: failed to add reference image', error);
+            toastr.error(String(error), t`Image Generation`);
+        }
+    }
+
+    saveSettingsDebounced();
+    renderRefImages();
+}
+
+/**
+ * Collects the ComfyUI workflow file names that could be used by this generation:
+ * the live settings' workflow plus, when the fallback chain is enabled, the workflow
+ * of every comfy preset in the chain.
+ * @returns {string[]} Unique workflow file names.
+ */
+function collectCandidateComfyWorkflows() {
+    const names = new Set();
+    /** @param {object} config A settings-shaped object (live settings or a preset snapshot). */
+    const consider = (config) => {
+        if (config && config.source === sources.comfy && config.comfy_type === comfyTypes.standard && config.comfy_workflow) {
+            names.add(config.comfy_workflow);
+        }
+    };
+    consider(extension_settings.sd);
+    if (extension_settings.sd.settings_fallback_enabled) {
+        for (const entry of getConfiguredPresetChain()) {
+            consider(entry.preset);
+        }
+    }
+    return [...names];
+}
+
+/**
+ * Checks whether any workflow this generation could run contains the reference image placeholder.
+ * @returns {Promise<boolean>} True when a candidate workflow uses the placeholder.
+ */
+async function anyCandidateWorkflowUsesReferenceImage() {
+    for (const fileName of collectCandidateComfyWorkflows()) {
+        try {
+            const result = await fetch('/api/sd/comfy/workflow', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ file_name: fileName }),
+            });
+            if (!result.ok) {
+                continue;
+            }
+            const workflow = await result.json();
+            if (REFERENCE_IMAGE_PLACEHOLDER.test(String(workflow))) {
+                return true;
+            }
+        } catch (error) {
+            console.warn('SD: could not inspect workflow for reference image placeholder', fileName, error);
+        }
+    }
+    return false;
+}
+
+/**
+ * Returns the reference images to choose from for this generation, or an empty array
+ * when the feature is disabled, the library is empty, or no candidate workflow uses
+ * the placeholder.
+ * @returns {Promise<{tag: string, description: string, path: string}[]>} Selectable reference images.
+ */
+async function getEligibleReferenceImages() {
+    if (!extension_settings.sd.ref_images_enabled) {
+        return [];
+    }
+    const images = getValidRefImages();
+    if (images.length === 0) {
+        return [];
+    }
+    if (!(await anyCandidateWorkflowUsesReferenceImage())) {
+        return [];
+    }
+    return images;
+}
+
+/**
+ * Builds the instruction appended to the image-prompt request that makes the LLM
+ * also pick a reference image, as a machine-readable JSON line.
+ * @param {{tag: string, description: string}[]} candidates Reference images to choose from.
+ * @returns {string} Instruction text.
+ */
+function buildReferenceSelectionAddendum(candidates) {
+    const list = candidates.map(x => `- "${x.tag}": ${x.description || 'no description'}`).join('\n');
+    return [
+        '',
+        'After the image prompt, append one final line containing exactly this JSON and nothing else:',
+        '{"reference_image": "<tag>"}',
+        'where <tag> is the tag of the reference image whose description best fits the requested scene. Available reference images:',
+        list,
+    ].join('\n');
+}
+
+/**
+ * Finds the library entry whose tag matches the given text.
+ * @param {string} text Tag text returned by the LLM.
+ * @param {{tag: string}[]} candidates Reference images to match against.
+ * @returns {object|null} The matching entry, or null.
+ */
+function matchReferenceTag(text, candidates) {
+    const needle = String(text ?? '').trim().toLowerCase();
+    if (!needle) {
+        return null;
+    }
+    const tagged = candidates.filter(x => String(x.tag ?? '').trim().length > 0);
+    return tagged.find(x => x.tag.trim().toLowerCase() === needle)
+        ?? tagged.find(x => needle.includes(x.tag.trim().toLowerCase()))
+        ?? null;
+}
+
+/**
+ * Extracts the {"reference_image": "..."} selection from a combined prompt+selection reply.
+ * @param {string} reply Raw LLM reply.
+ * @param {{tag: string}[]} candidates Reference images to match against.
+ * @returns {{cleaned: string, selected: object|null}} Reply without the JSON line, and the matched entry.
+ */
+function extractReferenceSelection(reply, candidates) {
+    const pattern = /\{\s*"?reference_image"?\s*:\s*"([^"]*)"\s*\}/gi;
+    let match;
+    let lastTag = null;
+    while ((match = pattern.exec(reply)) !== null) {
+        lastTag = match[1];
+    }
+    const cleaned = reply.replace(/\{\s*"?reference_image"?\s*:\s*"[^"]*"\s*\}/gi, ' ');
+    return { cleaned, selected: lastTag ? matchReferenceTag(lastTag, candidates) : null };
+}
+
+/**
+ * Runs an image-prompt LLM request through an optional companion extension hook.
+ * ST-ImagePromptProfiles uses this hook to switch profiles and always calls the
+ * supplied fallback while the selected profile is active.
+ * @param {string} quietPrompt Prompt for the chat-aware quiet generation.
+ * @returns {Promise<string>} Raw LLM reply.
+ */
+async function generateImagePromptQuiet(quietPrompt) {
+    const fallback = () => generateQuietPrompt({ quietPrompt });
+    const hook = globalThis.STImageGenerationHooks?.generatePrompt;
+    return typeof hook === 'function' ? await hook({ quietPrompt, fallback }) : await fallback();
+}
+
+/**
+ * Asks the image-prompt LLM to pick the best-fitting reference image for a scene
+ * in a dedicated (second) request.
+ * @param {string} prompt The final image prompt describing the scene.
+ * @param {{tag: string, description: string}[]} candidates Reference images to choose from.
+ * @returns {Promise<object|null>} The matched entry, or null.
+ */
+async function selectReferenceImageWithLlm(prompt, candidates) {
+    const list = candidates.map(x => `- "${x.tag}": ${x.description || 'no description'}`).join('\n');
+    const quietPrompt = [
+        'Pause your roleplay. An image is being generated for the current scene from this prompt:',
+        prompt,
+        '',
+        'Pick the reference image whose description best fits that scene:',
+        list,
+        '',
+        'Reply with ONLY the tag of the chosen reference image and nothing else.',
+    ].join('\n');
+    const reply = await generateImagePromptQuiet(quietPrompt);
+    return matchReferenceTag(String(reply ?? '').trim(), candidates);
+}
+
+/**
+ * Resolves which reference image the current ComfyUI generation should use.
+ * Prefers the selection made together with the image prompt; falls back to a
+ * dedicated LLM call, and finally to the first library image.
+ * @param {string} prompt The image prompt describing the scene.
+ * @returns {Promise<object|null>} The reference image to use, or null when the feature is off/empty.
+ */
+async function resolveReferenceImageForGeneration(prompt) {
+    if (!extension_settings.sd.ref_images_enabled) {
+        return null;
+    }
+    const images = getValidRefImages();
+    if (images.length === 0) {
+        return null;
+    }
+    if (pendingReferenceImage && images.some(x => x.path === pendingReferenceImage.path)) {
+        return pendingReferenceImage;
+    }
+    if (images.length === 1) {
+        pendingReferenceImage = images[0];
+        return pendingReferenceImage;
+    }
+    try {
+        pendingReferenceImage = await selectReferenceImageWithLlm(prompt, images) ?? images[0];
+    } catch (error) {
+        console.error('SD: reference image selection failed, using the first library image', error);
+        pendingReferenceImage = images[0];
+    }
+    return pendingReferenceImage;
+}
+
+/**
+ * Loads a reference image and returns it as a raw base64 string (no data URL header).
+ * @param {{path: string}} refImage Reference image entry.
+ * @returns {Promise<string|null>} Base64 image data, or null on failure.
+ */
+async function fetchReferenceImageBase64(refImage) {
+    try {
+        const response = await fetch(refImage.path);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const dataUrl = await getBase64Async(blob);
+        return String(dataUrl).split(',')[1] ?? null;
+    } catch (error) {
+        console.error('SD: could not load reference image', refImage.path, error);
+        return null;
+    }
+}
+
+// #endregion
+
+// #region RunPod lazy pod
+
+/** Poll cadence for the pod status indicator (faster while it is starting). */
+const RUNPOD_POLL_IDLE_MS = 30000;
+const RUNPOD_POLL_BUSY_MS = 5000;
+/** Frontend heartbeat cadence. The proxy tolerates browser timer pauses for five minutes. */
+const RUNPOD_HEARTBEAT_MS = 20000;
+
+let runpodStatusTimer = null;
+let runpodHeartbeatTimer = null;
+let runpodLastPhase = 'red';
+
+function getRunpodLazyUrl() {
+    return String(extension_settings.sd.runpod_lazy_url ?? '').trim().replace(/\/$/, '');
+}
+
+/**
+ * Reads the lazy proxy status without starting or warming a pod.
+ * @param {number} timeout Request timeout in milliseconds.
+ * @returns {Promise<object>} Parsed /lazy/status response.
+ */
+async function getRunpodStatus(timeout = 8000) {
+    const url = getRunpodLazyUrl();
+    if (!url) {
+        throw new Error('RunPod lazy proxy URL is not configured.');
+    }
+    const result = await fetch(`${url}/lazy/status`, { signal: AbortSignal.timeout(timeout) });
+    if (!result.ok) {
+        throw new Error(`RunPod status returned ${result.status}.`);
+    }
+    return result.json();
+}
+
+/**
+ * Checks whether the lazy proxy already has a ready pod.
+ * @param {number} timeout Request timeout in milliseconds.
+ * @returns {Promise<boolean>} True only when /lazy/status reports green.
+ */
+async function isRunpodReady(timeout = 8000) {
+    try {
+        return (await getRunpodStatus(timeout))?.state === 'green';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Updates the status dot + text from a /lazy/status response (or an error).
+ * @param {object|null} status Parsed status JSON, or null when unreachable.
+ */
+function renderRunpodStatus(status) {
+    const dot = document.getElementById('sd_runpod_dot');
+    const text = document.getElementById('sd_runpod_status_text');
+    if (!dot || !text) {
+        return;
+    }
+    const phase = status?.state ?? 'red';
+    runpodLastPhase = phase;
+    const phaseClass = `sd_runpod_${['red', 'orange', 'green'].includes(phase) ? phase : 'red'}`;
+    for (const el of [dot, document.getElementById('sd_runpod_bar_dot')].filter(Boolean)) {
+        el.classList.remove('sd_runpod_red', 'sd_runpod_orange', 'sd_runpod_green');
+        el.classList.add(phaseClass);
+    }
+    const openLink = document.getElementById('sd_runpod_open');
+    if (openLink) {
+        const showLink = phase === 'green' && status?.url;
+        openLink.style.display = showLink ? '' : 'none';
+        if (showLink) {
+            openLink.dataset.url = status.url;
+        }
+    }
+    if (!status) {
+        text.textContent = 'proxy unreachable';
+    } else if (phase === 'green') {
+        const left = status.idle_seconds_left ? ` (idle stop in ${Math.round(status.idle_seconds_left / 60)}m)` : '';
+        text.textContent = `ready on ${status.gpu ?? 'GPU'}${left}`;
+    } else if (phase === 'orange') {
+        text.textContent = `starting (models: ${status.model || (status.active ?? []).join(' + ') || '?'})…`;
+    } else {
+        text.textContent = 'off';
+    }
+    const barDot = document.getElementById('sd_runpod_bar_dot');
+    if (barDot) {
+        barDot.title = `RunPod pod: ${text.textContent} — click to ${phase === 'red' ? 'warm up' : 'shut down'}`;
+    }
+    return phase;
+}
+
+/** Adds the clickable pod-status dot to the chat bar (next to other extension icons). */
+function ensureRunpodBarDot() {
+    if (document.getElementById('sd_runpod_bar_dot')) {
+        return;
+    }
+    const anchor = document.getElementById('leftSendForm');
+    if (!anchor) {
+        return;
+    }
+    const dot = document.createElement('div');
+    dot.id = 'sd_runpod_bar_dot';
+    dot.classList.add('sd_runpod_dot', 'sd_runpod_bar_dot', 'sd_runpod_red', 'interactable');
+    dot.title = 'RunPod pod';
+    dot.tabIndex = 0;
+    dot.addEventListener('click', () => runpodControl(runpodLastPhase === 'red' ? 'warmup' : 'shutdown'));
+    anchor.appendChild(dot);
+    dot.style.display = getRunpodLazyUrl() ? '' : 'none';
+}
+
+let runpodPollFailures = 0;
+
+async function pollRunpodStatus() {
+    const url = getRunpodLazyUrl();
+    if (!url) {
+        return;
+    }
+    let phase = runpodLastPhase;
+    try {
+        runpodPollFailures = 0;
+        phase = renderRunpodStatus(await getRunpodStatus());
+    } catch {
+        // A single slow/failed poll (e.g. while the proxy is provisioning a pod)
+        // must not flip the dot to red; only sustained unreachability does.
+        runpodPollFailures++;
+        if (runpodPollFailures >= 3) {
+            phase = renderRunpodStatus(null);
+        }
+    }
+    clearTimeout(runpodStatusTimer);
+    runpodStatusTimer = setTimeout(pollRunpodStatus, phase === 'orange' || runpodPollFailures ? RUNPOD_POLL_BUSY_MS : RUNPOD_POLL_IDLE_MS);
+}
+
+async function runpodControl(action) {
+    const url = getRunpodLazyUrl();
+    if (!url) {
+        return;
+    }
+    try {
+        if (action === 'warmup' && !(await pushRunpodCatalog())) {
+            throw new Error('Could not sync the RunPod model catalog. The pod was not started.');
+        }
+        const result = await fetch(`${url}/lazy/${action}`, { method: 'POST', signal: AbortSignal.timeout(10000) });
+        if (!result.ok) {
+            throw new Error(`RunPod ${action} returned ${result.status}.`);
+        }
+        renderRunpodStatus(await result.json());
+        if (action === 'warmup') {
+            toastr.info(t`Pod warmup requested. Models will pre-download; the dot turns green when ready.`, t`Image Generation`);
+        }
+    } catch (error) {
+        toastr.error(String(error), t`Image Generation`);
+    }
+    clearTimeout(runpodStatusTimer);
+    runpodStatusTimer = setTimeout(pollRunpodStatus, RUNPOD_POLL_BUSY_MS);
+}
+
+function runpodHeartbeat() {
+    const url = getRunpodLazyUrl();
+    if (!url) {
+        return;
+    }
+    // This only renews the proxy's frontend lease and never starts a pod. The
+    // proxy owns the stable upstream keepalive cadence so browser timer
+    // throttling cannot directly skew it.
+    fetch(`${url}/lazy/ping`, { method: 'POST', signal: AbortSignal.timeout(5000) }).catch(() => { });
+}
+
+/** (Re)starts the status polling and frontend-heartbeat loops. */
+function setupRunpodLoops() {
+    clearTimeout(runpodStatusTimer);
+    clearInterval(runpodHeartbeatTimer);
+    ensureRunpodBarDot();
+    const barDot = document.getElementById('sd_runpod_bar_dot');
+    if (barDot) {
+        barDot.style.display = getRunpodLazyUrl() ? '' : 'none';
+    }
+    if (!getRunpodLazyUrl()) {
+        renderRunpodStatus(null);
+        return;
+    }
+    pollRunpodStatus();
+    runpodHeartbeat();
+    runpodHeartbeatTimer = setInterval(runpodHeartbeat, RUNPOD_HEARTBEAT_MS);
+}
+
+function onRunpodLazyUrlInput() {
+    extension_settings.sd.runpod_lazy_url = String($(this).val() ?? '').trim();
+    saveSettingsDebounced();
+    setupRunpodLoops();
+}
+
+/**
+ * Whether a comfy URL points at the runpod-lazy proxy.
+ * @param {string} url ComfyUI URL to test.
+ * @returns {boolean} True when it equals the configured proxy URL.
+ */
+function isRunpodProxyUrl(url) {
+    const lazy = getRunpodLazyUrl();
+    return !!lazy && String(url ?? '').trim().replace(/\/$/, '') === lazy;
+}
+
+/**
+ * Returns the configured RunPod model catalog entries that have a filename.
+ * @returns {{name: string, value: string, downloads: string}[]} Catalog entries.
+ */
+function getRunpodCatalog() {
+    const models = Array.isArray(extension_settings.sd.runpod_models) ? extension_settings.sd.runpod_models : [];
+    return models.filter(m => m && String(m.value ?? '').trim());
+}
+
+/** Catalog entries that go in the Model dropdown (kind !== 'lora'). */
+function getRunpodModelEntries() {
+    return getRunpodCatalog().filter(m => m.kind !== 'lora');
+}
+
+/**
+ * Parses a catalog entry's download lines ("dest-subpath url" per line).
+ * @param {string} text Multiline downloads definition.
+ * @returns {{dest: string, url: string}[]} Parsed file list.
+ */
+function parseRunpodFiles(text) {
+    return String(text ?? '').split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => {
+            const space = line.indexOf(' ');
+            return space > 0 ? { dest: line.slice(0, space).trim(), url: line.slice(space + 1).trim() } : null;
+        })
+        .filter(x => x && x.dest && x.url);
+}
+
+/**
+ * The model+lora filenames saved for whichever config uses the proxy: the live
+ * settings if they point at it, else the chain entry that does.
+ * @returns {string[]} Active catalog values (model and/or lora).
+ */
+function getRunpodActiveModels() {
+    let config = null;
+    // Only use live settings when the current source is actually ComfyUI AND
+    // its model is in the catalog. If the user is on Grok/OpenRouter but
+    // comfy_url points at the proxy, the fallback chain's ComfyUI presets are
+    // what matter, not the live source which may not even be image-gen capable.
+    if (extension_settings.sd.source === 'comfy' && isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        const known = new Set(getRunpodCatalog().map(m => m.value));
+        if (known.has(extension_settings.sd.model)) {
+            config = extension_settings.sd;
+        }
+    }
+    if (!config) {
+        const chain = Array.isArray(extension_settings.sd.settings_preset_chain) ? extension_settings.sd.settings_preset_chain : [];
+        // Find the first ComfyUI preset in the chain, not just any preset with a matching URL
+        config = chain.find(e => e?.preset?.source === 'comfy' && isRunpodProxyUrl(e?.preset?.comfy_url))?.preset ?? null;
+    }
+    if (!config) {
+        return [];
+    }
+    const known = new Set(getRunpodCatalog().map(m => m.value));
+    return [config.model, config.lora].filter(v => v && known.has(v));
+}
+
+/**
+ * Pushes the model catalog + active selection to the proxy.
+ * Catalog updates only store configuration; only /lazy/warmup may provision.
+ * @returns {Promise<boolean>} Whether the proxy accepted the catalog.
+ */
+async function pushRunpodCatalog() {
+    const url = getRunpodLazyUrl();
+    if (!url) {
+        return false;
+    }
+    const models = getRunpodCatalog().map(m => ({
+        name: m.name || m.value,
+        value: m.value,
+        kind: m.kind === 'lora' ? 'lora' : 'model',
+        files: parseRunpodFiles(m.downloads),
+    }));
+    try {
+        const result = await fetch(`${url}/lazy/catalog`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(8000),
+            body: JSON.stringify({ models, active: getRunpodActiveModels() }),
+        });
+        if (!result.ok) {
+            throw new Error(`catalog returned ${result.status}`);
+        }
+        return true;
+    } catch (error) {
+        console.warn('SD: runpod catalog push failed', error);
+        return false;
+    }
+}
+
+/**
+ * Rebuilds the RunPod model catalog editor in the settings UI.
+ */
+function renderRunpodModels() {
+    const container = $('#sd_runpod_models_list');
+    if (!container.length) {
+        return;
+    }
+    container.empty();
+    const models = Array.isArray(extension_settings.sd.runpod_models) ? extension_settings.sd.runpod_models : [];
+    if (models.length === 0) {
+        container.append($('<small></small>').text('No models configured.'));
+        return;
+    }
+    models.forEach((model, index) => {
+        const nameInput = $('<input>').addClass('text_pole flex1').attr({ type: 'text', placeholder: 'Display name' })
+            .val(model.name || '')
+            .on('change', function () { model.name = String($(this).val() ?? '').trim(); saveSettingsDebounced(); pushRunpodCatalog(); });
+        const valueInput = $('<input>').addClass('text_pole flex1').attr({ type: 'text', placeholder: 'Filename (used by %model% / %lora%)' })
+            .val(model.value || '')
+            .on('change', function () { model.value = String($(this).val() ?? '').trim(); saveSettingsDebounced(); pushRunpodCatalog(); });
+        const kindSelect = $('<select></select>').addClass('text_pole')
+            .append($('<option></option>').val('model').text('model'))
+            .append($('<option></option>').val('lora').text('lora'))
+            .val(model.kind === 'lora' ? 'lora' : 'model')
+            .on('change', function () { model.kind = String($(this).val()); saveSettingsDebounced(); pushRunpodCatalog(); });
+        const deleteButton = $('<div></div>').addClass('menu_button menu_button_icon fa-solid fa-trash-can')
+            .attr('title', 'Remove model')
+            .on('click', () => { models.splice(index, 1); saveSettingsDebounced(); renderRunpodModels(); pushRunpodCatalog(); });
+        const downloadsInput = $('<textarea></textarea>').addClass('text_pole textarea_compact')
+            .attr({ rows: 2, placeholder: 'One file per line: <models-subpath> <url>\ne.g. unet/model.gguf https://huggingface.co/...' })
+            .val(model.downloads || '')
+            .on('change', function () { model.downloads = String($(this).val() ?? ''); saveSettingsDebounced(); pushRunpodCatalog(); });
+        container.append(
+            $('<div></div>').addClass('flexFlowColumn marginTopBot5')
+                .append($('<div></div>').addClass('flex-container alignItemsCenter').append(nameInput).append(valueInput).append(kindSelect).append(deleteButton))
+                .append(downloadsInput));
+    });
+}
+
+function onRunpodModelsAddClick() {
+    if (!Array.isArray(extension_settings.sd.runpod_models)) {
+        extension_settings.sd.runpod_models = [];
+    }
+    extension_settings.sd.runpod_models.push({ name: '', value: '', downloads: '' });
+    saveSettingsDebounced();
+    renderRunpodModels();
+}
+
+// #endregion
+
+/**
+ * Rebuilds the custom wand entries list in the settings UI.
+ */
+function renderCustomEntriesList() {
+    const container = $('#sd_custom_entries_list');
+    if (!container.length) {
+        return;
+    }
+
+    container.empty();
+
+    const entries = Array.isArray(extension_settings.sd.custom_entries) ? extension_settings.sd.custom_entries : [];
+
+    if (entries.length === 0) {
+        const empty = $('<small></small>')
+            .attr('data-i18n', 'No custom entries yet.')
+            .text('No custom entries yet.');
+        container.append(empty);
+        return;
+    }
+
+    for (const entry of entries) {
+        const preview = String(entry.prompt || '').replace(/\s+/g, ' ').trim();
+        const truncated = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+        const titleEl = $('<div></div>').addClass('sd_custom_entry_title').text(entry.title);
+        const previewEl = $('<small></small>').addClass('sd_custom_entry_preview').text(truncated);
+        const textBlock = $('<div></div>').addClass('flex1 flexFlowColumn').append(titleEl).append(previewEl);
+
+        const editButton = $('<div></div>')
+            .addClass('menu_button menu_button_icon fa-solid fa-pencil')
+            .attr('data-entry-id', entry.id)
+            .attr('data-action', 'edit')
+            .attr('title', 'Edit')
+            .attr('data-i18n', '[title]Edit');
+        const deleteButton = $('<div></div>')
+            .addClass('menu_button menu_button_icon fa-solid fa-trash-can')
+            .attr('data-entry-id', entry.id)
+            .attr('data-action', 'delete')
+            .attr('title', 'Delete')
+            .attr('data-i18n', '[title]Delete');
+
+        const row = $('<div></div>')
+            .addClass('flex-container alignItemsCenter marginTopBot5 sd_custom_entry_row')
+            .append(textBlock)
+            .append(editButton)
+            .append(deleteButton);
+
+        container.append(row);
+    }
+}
+
+/**
+ * Generates a unique id for a custom entry.
+ * @returns {string} A unique identifier.
+ */
+function getUniqueCustomEntryId() {
+    return crypto.randomUUID?.() ?? ('ce_' + Date.now() + '_' + Math.floor(Math.random() * 1e6));
+}
+
+/**
+ * Opens a popup to create/edit a custom entry and returns the entered values.
+ * @param {string} title Initial title value.
+ * @param {string} prompt Initial prompt value.
+ * @returns {Promise<{title: string, prompt: string} | null>} Entered values, or null if cancelled.
+ */
+async function showCustomEntryPopup(title, prompt) {
+    const form = $('<div></div>').addClass('flex-container flexFlowColumn');
+    const titleLabel = $('<label></label>').attr('data-i18n', 'Title').text('Title');
+    const titleInput = $('<input>')
+        .addClass('text_pole')
+        .attr('type', 'text')
+        .attr('id', 'sd_custom_entry_title_input')
+        .val(title || '');
+    const promptLabel = $('<label></label>').attr('data-i18n', 'Prompt').text('Prompt');
+    const promptInput = $('<textarea></textarea>')
+        .addClass('text_pole textarea_compact')
+        .attr('id', 'sd_custom_entry_prompt_input')
+        .attr('rows', 5)
+        .val(prompt || '');
+
+    form.append(titleLabel).append(titleInput).append(promptLabel).append(promptInput);
+
+    const popup = new Popup(form, POPUP_TYPE.CONFIRM, '', { okButton: t`Save`, cancelButton: t`Cancel` });
+    const result = await popup.show();
+
+    if (!result) {
+        return null;
+    }
+
+    return {
+        title: String(titleInput.val() ?? '').trim(),
+        prompt: String(promptInput.val() ?? '').trim(),
+    };
+}
+
+async function onAddCustomEntryClick() {
+    const values = await showCustomEntryPopup('', '');
+
+    if (!values) {
+        return;
+    }
+
+    if (!values.title || !values.prompt) {
+        toastr.warning(t`Both a title and a prompt are required.`, t`Image Generation`);
+        return;
+    }
+
+    if (!Array.isArray(extension_settings.sd.custom_entries)) {
+        extension_settings.sd.custom_entries = [];
+    }
+
+    extension_settings.sd.custom_entries.push({
+        id: getUniqueCustomEntryId(),
+        title: values.title,
+        prompt: values.prompt,
+    });
+
+    saveSettingsDebounced();
+    renderCustomEntriesList();
+    renderCustomDropdownEntries();
+}
+
+async function onEditCustomEntryClick(id) {
+    const entries = Array.isArray(extension_settings.sd.custom_entries) ? extension_settings.sd.custom_entries : [];
+    const entry = entries.find(e => e.id === id);
+
+    if (!entry) {
+        return;
+    }
+
+    const values = await showCustomEntryPopup(entry.title, entry.prompt);
+
+    if (!values) {
+        return;
+    }
+
+    if (!values.title || !values.prompt) {
+        toastr.warning(t`Both a title and a prompt are required.`, t`Image Generation`);
+        return;
+    }
+
+    entry.title = values.title;
+    entry.prompt = values.prompt;
+
+    saveSettingsDebounced();
+    renderCustomEntriesList();
+    renderCustomDropdownEntries();
+}
+
+async function onDeleteCustomEntryClick(id) {
+    const entries = Array.isArray(extension_settings.sd.custom_entries) ? extension_settings.sd.custom_entries : [];
+    const index = entries.findIndex(e => e.id === id);
+
+    if (index === -1) {
+        return;
+    }
+
+    const confirmed = await callGenericPopup(t`Are you sure you want to delete the entry "${entries[index].title}"?`, POPUP_TYPE.CONFIRM, '', { okButton: t`Delete`, cancelButton: t`Cancel` });
+
+    if (!confirmed) {
+        return;
+    }
+
+    entries.splice(index, 1);
+    saveSettingsDebounced();
+    renderCustomEntriesList();
+    renderCustomDropdownEntries();
 }
 
 /**
@@ -1451,6 +2510,12 @@ function onDenoisingStrengthInput() {
     saveSettingsDebounced();
 }
 
+function onLoraStrengthInput() {
+    extension_settings.sd.lora_strength = Number($('#sd_lora_strength').val());
+    $('#sd_lora_strength_value').val(extension_settings.sd.lora_strength.toFixed(2));
+    saveSettingsDebounced();
+}
+
 function onHrSecondPassStepsInput() {
     extension_settings.sd.hr_second_pass_steps = Number($('#sd_hr_second_pass_steps').val());
     $('#sd_hr_second_pass_steps_value').val(extension_settings.sd.hr_second_pass_steps);
@@ -1472,8 +2537,47 @@ function onHFModelInput() {
     saveSettingsDebounced();
 }
 
+/**
+ * Stores the current model/lora choice for the active comfy workflow, so
+ * switching back to this workflow restores it (per provider via presets).
+ * @param {'model'|'lora'} key Which selection to remember.
+ * @param {string} value Selected value.
+ */
+function rememberWorkflowPref(key, value) {
+    if (extension_settings.sd.source !== sources.comfy || !extension_settings.sd.comfy_workflow) {
+        return;
+    }
+    const prefs = extension_settings.sd.comfy_workflow_prefs;
+    prefs[extension_settings.sd.comfy_workflow] = { ...(prefs[extension_settings.sd.comfy_workflow] ?? {}), [key]: value };
+}
+
+async function onLoraChange() {
+    extension_settings.sd.lora = $('#sd_lora').find(':selected').val();
+    rememberWorkflowPref('lora', extension_settings.sd.lora);
+    saveSettingsDebounced();
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        pushRunpodCatalog();
+    }
+}
+
 function onComfyWorkflowChange() {
     extension_settings.sd.comfy_workflow = $('#sd_comfy_workflow').find(':selected').val();
+    // Restore the model/lora remembered for this workflow (auto-configuration
+    // when switching between e.g. the flux and qwen workflow families).
+    const pref = extension_settings.sd.comfy_workflow_prefs?.[extension_settings.sd.comfy_workflow];
+    if (pref) {
+        if (pref.model) {
+            extension_settings.sd.model = pref.model;
+            $('#sd_model').val(pref.model);
+        }
+        if (pref.lora !== undefined) {
+            extension_settings.sd.lora = pref.lora;
+            $('#sd_lora').val(pref.lora);
+        }
+        if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+            pushRunpodCatalog();
+        }
+    }
     saveSettingsDebounced();
 }
 
@@ -1642,7 +2746,14 @@ async function validateComfyRunPodUrl() {
 async function onModelChange() {
     const selectedModel = $('#sd_model').find(':selected');
     extension_settings.sd.model = selectedModel.val();
+    rememberWorkflowPref('model', extension_settings.sd.model);
     saveSettingsDebounced();
+
+    // Keep the proxy's stored selection current, but catalog updates never
+    // download, provision, or start a pod. Warm up applies the selection.
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        pushRunpodCatalog();
+    }
 
     if (extension_settings.sd.model && extension_settings.sd.source === sources.electronhub) {
         const cachedModel = selectedModel.data('model');
@@ -2055,6 +3166,10 @@ async function loadNovelSamplers() {
 async function loadComfySamplers() {
     if (extension_settings.sd.comfy_type === comfyTypes.runpod_serverless) {
         return ['N/A'];
+    }
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        // Do not query /object_info through a cold lazy proxy on page load.
+        return extension_settings.sd.sampler ? [extension_settings.sd.sampler] : [];
     }
     if (!extension_settings.sd.comfy_url) {
         return [];
@@ -2694,6 +3809,11 @@ function loadNovelSchedulers() {
 }
 
 async function loadComfyModels() {
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        // The RunPod pod downloads models on demand: list the configured catalog
+        // instead of asking the (possibly cold) backend what it has on disk.
+        return getRunpodModelEntries().map(m => ({ value: m.value, text: m.name || m.value }));
+    }
     if (extension_settings.sd.comfy_type === comfyTypes.runpod_serverless) {
         $('#sd_runpod_key').toggleClass('success', !!secret_state[SECRET_KEYS.COMFY_RUNPOD]);
         return [
@@ -2818,6 +3938,10 @@ async function loadComfySchedulers() {
     if (extension_settings.sd.comfy_type === comfyTypes.runpod_serverless) {
         return ['N/A'];
     }
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        // Do not query /object_info through a cold lazy proxy on page load.
+        return extension_settings.sd.scheduler ? [extension_settings.sd.scheduler] : [];
+    }
     if (!extension_settings.sd.comfy_url) {
         return [];
     }
@@ -2931,7 +4055,10 @@ async function loadVaes() {
         $('#sd_vae').append(option);
     }
 
-    if (!extension_settings.sd.vae && vaes.length > 0 && vaes[0] !== 'N/A') {
+    // Snap to the first real entry when nothing is selected OR the saved value
+    // is not offered (otherwise the dropdown displays the first option while
+    // generations keep sending the stale saved value).
+    if (vaes.length > 0 && vaes[0] !== 'N/A' && !vaes.includes(extension_settings.sd.vae)) {
         extension_settings.sd.vae = vaes[0];
         $('#sd_vae').val(extension_settings.sd.vae).trigger('change');
     }
@@ -2964,6 +4091,15 @@ async function loadAutoVaes() {
 async function loadComfyVaes() {
     if (extension_settings.sd.comfy_type === comfyTypes.runpod_serverless) {
         return ['N/A'];
+    }
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        // Derive the VAE list from the catalog's download manifests (dest under
+        // vae/) instead of querying the pod, which may be cold.
+        const vaes = getRunpodCatalog()
+            .flatMap(m => parseRunpodFiles(m.downloads))
+            .filter(f => /^vae\//i.test(f.dest))
+            .map(f => f.dest.split('/').pop());
+        return [...new Set(vaes)];
     }
     if (!extension_settings.sd.comfy_url) {
         return [];
@@ -3013,6 +4149,16 @@ async function loadComfyWorkflows() {
 }
 
 function getGenerationType(prompt) {
+    // Custom wand entries use the trigger convention 'custom_<id>' and bypass
+    // the multimodal/free_extend transforms applied to the built-in triggers.
+    const trimmedPrompt = String(prompt).trim();
+    if (Array.isArray(extension_settings.sd.custom_entries)) {
+        const customEntry = extension_settings.sd.custom_entries.find(e => ('custom_' + e.id) === trimmedPrompt);
+        if (customEntry) {
+            return generationMode.CUSTOM;
+        }
+    }
+
     let mode = generationMode.FREE;
 
     for (const [key, values] of Object.entries(triggerWords)) {
@@ -3036,6 +4182,13 @@ function getGenerationType(prompt) {
 }
 
 function getQuietPrompt(mode, trigger) {
+    if (mode === generationMode.CUSTOM) {
+        const entry = Array.isArray(extension_settings.sd.custom_entries)
+            ? extension_settings.sd.custom_entries.find(e => ('custom_' + e.id) === String(trigger).trim())
+            : undefined;
+        return entry ? entry.prompt : trigger;
+    }
+
     if (mode === generationMode.FREE) {
         return trigger;
     }
@@ -3201,6 +4354,9 @@ async function generatePicture(initiator, args, trigger, message, callback) {
 
     try {
         const combineNegatives = (prefix) => { negativePromptPrefix = combinePrefixes(negativePromptPrefix, prefix); };
+
+        // Each new generation picks its own reference image (swipes reuse the last one).
+        pendingReferenceImage = null;
 
         // generate the text prompt for the image
         let prompt = await getPrompt(generationType, message, trigger, quietPrompt, combineNegatives);
@@ -3446,11 +4602,34 @@ function getUserAvatarUrl() {
  */
 async function generatePrompt(quietPrompt) {
     const toast = toastr.info('Generating image prompt with an LLM...', 'Image Generation');
-    const fallback = () => generateQuietPrompt({ quietPrompt });
-    const hook = globalThis.STImageGenerationHooks?.generatePrompt;
-    const reply = typeof hook === 'function' ? await hook({ quietPrompt, fallback }) : await fallback();
+    let reply;
+
+    // When the workflow uses a reference image and there is more than one to choose
+    // from, have the same LLM request return the selection along with the prompt.
+    const refCandidates = await getEligibleReferenceImages();
+    if (refCandidates.length === 1) {
+        pendingReferenceImage = refCandidates[0];
+    }
+    const combineReferenceSelection = refCandidates.length > 1;
+    const effectiveQuietPrompt = combineReferenceSelection
+        ? quietPrompt + '\n' + buildReferenceSelectionAddendum(refCandidates)
+        : quietPrompt;
+
+    try {
+        reply = await generateImagePromptQuiet(effectiveQuietPrompt);
+    } finally {
+        toastr.clear(toast);
+    }
+
+    if (combineReferenceSelection) {
+        const { cleaned, selected } = extractReferenceSelection(String(reply ?? ''), refCandidates);
+        reply = cleaned;
+        // No/invalid selection -> leave unset; the workflow builder retries with a dedicated call.
+        pendingReferenceImage = selected;
+        console.log('SD: reference image selected with the image prompt:', selected?.tag ?? '(none)');
+    }
+
     const processedReply = processReply(reply);
-    toastr.clear(toast);
 
     if (!processedReply) {
         toastr.error('Prompt generation produced no text. Make sure you\'re using a valid instruct template and try again', 'Image Generation');
@@ -3590,34 +4769,62 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
     }
 
     const currentChatId = getCurrentChatId();
-    let genOutput = null;
-    let lastError = null;
-    const chain = extension_settings.sd.settings_fallback_enabled ? getConfiguredPresetChain() : [];
-    const restore = snapshotSdSettings();
-    try {
-        const attempts = chain.length ? chain : [{ name: 'Current provider', preset: null }];
-        for (const entry of attempts) {
-            if (entry.preset) applySdSettingsSnapshot(entry.preset);
-            try {
-                genOutput = await attemptImageGeneration(signal);
-                break;
-            } catch (error) {
-                lastError = error;
-                if (signal?.aborted) break;
-                console.warn(`Image provider "${entry.name}" failed`, error);
-                if (attempts.length > 1) toastr.warning(`Provider "${entry.name}" failed; trying the next provider…`, 'Image Generation');
+    const fallbackChain = extension_settings.sd.settings_fallback_enabled ? getConfiguredPresetChain() : [];
+    let genOutput;
+
+    if (fallbackChain.length > 0) {
+        // Chain mode: try every preset in order. Locally-hosted backends are probed
+        // first so a powered-off server is skipped after ~1.5s instead of stalling
+        // the attempt. The live settings are restored afterward either way.
+        const restore = snapshotSdSettings();
+        let lastError = new Error('No provider in the fallback chain was reachable.');
+        try {
+            for (const entry of fallbackChain) {
+                applySdSettingsSnapshot(entry.preset);
+
+                if (!(await isCurrentSourceReachable())) {
+                    console.warn(`SD: chain entry "${entry.name}" is not reachable, skipping`);
+                    toastr.warning(`Provider "${entry.name}" is not reachable, trying the next one…`, 'Image Generation');
+                    continue;
+                }
+
+                try {
+                    genOutput = await attemptImageGeneration(signal);
+                    break;
+                } catch (err) {
+                    if (signal?.aborted) {
+                        console.log('SD: Image generation aborted by user');
+                        toastr.info('Image generation stopped.', 'Image Generation');
+                        return;
+                    }
+                    lastError = err;
+                    console.error(`SD: generation with chain entry "${entry.name}" failed`, err);
+                    toastr.warning(`Provider "${entry.name}" failed, trying the next one…`, 'Image Generation');
+                }
             }
+        } finally {
+            applySdSettingsSnapshot(restore);
         }
-    } finally {
-        applySdSettingsSnapshot(restore);
-    }
-    if (!genOutput) {
-        if (signal?.aborted) {
-            toastr.info('Image generation stopped.', 'Image Generation');
+
+        if (!genOutput) {
+            toastr.error('Image generation failed for every provider in the fallback chain.' + '\n\n' + String(lastError), 'Image Generation');
             return;
         }
-        toastr.error('Image generation failed for every configured provider.' + '\n\n' + String(lastError || ''), 'Image Generation');
-        return;
+    } else {
+        try {
+            genOutput = await attemptImageGeneration(signal);
+        } catch (err) {
+            // Check if this was an intentional abort by user
+            if (signal?.aborted) {
+                console.log('SD: Image generation aborted by user');
+                toastr.info('Image generation stopped.', 'Image Generation');
+                return;
+            }
+
+            console.error('Image generation request error: ', err);
+            toastr.error('Image generation failed. Please try again.' + '\n\n' + String(err), 'Image Generation');
+            return;
+        }
     }
 
     const { result, prefixedPrompt } = genOutput;
@@ -4434,6 +5641,13 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
     (extension_settings.sd.comfy_placeholders ?? []).forEach(ph => {
         workflow = workflow.replaceAll(`"%${ph.find}%"`, JSON.stringify(substituteParams(ph.replace)));
     });
+    // Log the workflow before image payloads are substituted in: keeps private
+    // image data (avatars, reference images) out of the console and avoids
+    // scanning multi-megabyte strings (a redaction regex here previously blew
+    // the stack on large reference images).
+    console.log(`{
+        "prompt": ${workflow}
+    }`);
     if (/%user_avatar%/gi.test(workflow)) {
         const response = await fetch(getUserAvatarUrl());
         if (response.ok) {
@@ -4456,9 +5670,18 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
             workflow = workflow.replaceAll('"%char_avatar%"', JSON.stringify(PNG_PIXEL));
         }
     }
-    console.log(`{
-        "prompt": ${workflow}
-    }`);
+    if (REFERENCE_IMAGE_PLACEHOLDER.test(workflow)) {
+        const refImage = await resolveReferenceImageForGeneration(prompt);
+        const refBase64 = (refImage && await fetchReferenceImageBase64(refImage)) || PNG_PIXEL;
+        if (refBase64 !== PNG_PIXEL) {
+            console.log(`SD: workflow reference image: "${refImage.tag}" (${refImage.path})`);
+            toastr.info(`Reference image: ${refImage.description || refImage.tag || refImage.path}`, 'Image Generation');
+        } else {
+            console.warn('SD: workflow uses %reference_image% but no library image was available; sending a transparent pixel');
+        }
+        workflow = workflow.replaceAll('"%reference_image%"', JSON.stringify(refBase64));
+        workflow = workflow.replaceAll('"%reference-image%"', JSON.stringify(refBase64));
+    }
     const promptResult = await fetch(`${basePath}/generate`, {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -4487,9 +5710,14 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
 async function generateComfyImage(prompt, negativePrompt, signal) {
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url) && !(await isRunpodReady(SOURCE_PROBE_TIMEOUT_MS))) {
+        throw new Error('RunPod on-demand pod is not ready. Start it with the Warm up control.');
+    }
     const placeholders = [
         'model',
         'vae',
+        'lora',
+        'lora_strength',
         'sampler',
         'scheduler',
         'steps',
@@ -4955,7 +6183,7 @@ async function onComfyOpenWorkflowEditorClick() {
             file_name: extension_settings.sd.comfy_workflow,
         }),
     })).json();
-    const editorHtml = $(await $.get('scripts/extensions/stable-diffusion/comfyWorkflowEditor.html'));
+    const editorHtml = $(await $.get('scripts/extensions/third-party/ST-ImageProviderFallback/comfyWorkflowEditor.html'));
     const saveValue = (/** @type {Popup} */ _popup) => {
         workflow = $('#sd_comfy_workflow_editor_workflow').val().toString();
         return true;
@@ -5176,6 +6404,8 @@ async function sendMessage(prompt, image, generationType, additionalNegativePref
             media_display: MEDIA_DISPLAY.GALLERY,
             media_index: 0,
             inline_image: false,
+            sd_prompt: prompt,
+            sd_prompt_message: messageText,
         },
     };
     context.chat.push(message);
@@ -5223,6 +6453,7 @@ async function addSDGenButtons() {
     });
 
     $(document).on('click', '.sd_message_gen', (e) => sdMessageButton($(e.currentTarget), { animate: false }));
+    $(document).on('click', '.mes_edit', rememberImagePromptBeforeEdit);
 
     $(document).on('click touchend', function (e) {
         const target = $(e.target);
@@ -5237,7 +6468,10 @@ async function addSDGenButtons() {
         }
     });
 
-    $('#sd_dropdown [id]').on('click', function () {
+    renderCustomDropdownEntries();
+
+    // Use event delegation so dynamically-added custom entries also respond to clicks.
+    $('#sd_dropdown').on('click', 'li[id]', function () {
         dropdown.fadeOut(animation_duration);
         const id = $(this).attr('id');
         const idParamMap = {
@@ -5255,8 +6489,37 @@ async function addSDGenButtons() {
         if (param) {
             console.log('doing /sd ' + param);
             generatePicture(initiators.wand, {}, param);
+            return;
+        }
+
+        if (id && id.startsWith('sd_custom_')) {
+            const entryId = id.slice('sd_custom_'.length);
+            console.log('doing /sd custom_' + entryId);
+            generatePicture(initiators.wand, {}, 'custom_' + entryId);
         }
     });
+}
+
+/**
+ * Renders the user-defined custom entries into the wand dropdown.
+ * Removes any previously rendered custom entries first.
+ */
+function renderCustomDropdownEntries() {
+    const list = $('#sd_dropdown ul.list-group');
+    if (!list.length) {
+        return;
+    }
+
+    list.find('li.sd_custom_entry').remove();
+
+    const entries = Array.isArray(extension_settings.sd.custom_entries) ? extension_settings.sd.custom_entries : [];
+    for (const entry of entries) {
+        const li = $('<li></li>')
+            .addClass('list-group-item sd_custom_entry')
+            .attr('id', 'sd_custom_' + entry.id)
+            .text(entry.title);
+        list.append(li);
+    }
 }
 
 function isValidState() {
@@ -5324,6 +6587,108 @@ function isValidState() {
 
 /** @type {WeakMap<HTMLElement, AbortController>} */
 const buttonAbortControllers = new WeakMap();
+
+/** @type {WeakMap<ChatMessage, { message: string, prompt: string }>} */
+const imagePromptEditSnapshots = new WeakMap();
+
+/**
+ * Gets the most recent generated media attachment whose prompt backs image swipes.
+ * @param {ChatMessage} message Message that owns the media gallery.
+ * @returns {MediaAttachment|null} Generated media attachment, if one exists.
+ */
+function getImagePromptMedia(message) {
+    const media = message?.extra?.media;
+    if (!Array.isArray(media)) {
+        return null;
+    }
+
+    return media.findLast(item => item?.source === MEDIA_SOURCE.GENERATED || item?.generation_type !== undefined) ?? null;
+}
+
+/**
+ * Extracts an edited prompt while preserving the surrounding generated-message template.
+ * Falls back to the entire edited message when the old prompt cannot be located, which
+ * also supports users who intentionally replace the template along with the prompt.
+ * @param {string} previousMessage Message text before editing.
+ * @param {string} editedMessage Message text after editing.
+ * @param {string} previousPrompt Prompt represented by the previous message.
+ * @returns {string} Prompt to use for subsequent image swipes.
+ */
+function extractEditedImagePrompt(previousMessage, editedMessage, previousPrompt) {
+    if (previousMessage === editedMessage) {
+        return previousPrompt;
+    }
+
+    if (previousPrompt) {
+        let promptIndex = previousMessage.lastIndexOf(previousPrompt);
+        while (promptIndex >= 0) {
+            const prefix = previousMessage.slice(0, promptIndex);
+            const suffix = previousMessage.slice(promptIndex + previousPrompt.length);
+            if (editedMessage.startsWith(prefix) && editedMessage.endsWith(suffix) && editedMessage.length >= prefix.length + suffix.length) {
+                return editedMessage.slice(prefix.length, editedMessage.length - suffix.length).trim();
+            }
+            promptIndex = previousMessage.lastIndexOf(previousPrompt, promptIndex - 1);
+        }
+    }
+
+    return editedMessage.trim();
+}
+
+/**
+ * Remembers the pre-edit message text. New image messages persist this information,
+ * while this snapshot provides the same behavior for messages created before the fix.
+ * @param {JQuery.ClickEvent} event Edit-button click event.
+ */
+function rememberImagePromptBeforeEdit(event) {
+    const context = getContext();
+    const messageId = Number($(event.currentTarget).closest('.mes').attr('mesid'));
+    const message = context.chat[messageId];
+    const mediaAttachment = getImagePromptMedia(message);
+    if (!message || !mediaAttachment) {
+        return;
+    }
+
+    const messageText = String(message.mes ?? '');
+    const representedMedia = message.extra.media.findLast(item => item?.title && messageText.includes(item.title));
+    const prompt = message.extra?.sd_prompt ?? representedMedia?.title ?? mediaAttachment.title ?? message.extra?.title ?? '';
+    imagePromptEditSnapshots.set(message, {
+        message: messageText,
+        prompt: String(prompt),
+    });
+}
+
+/**
+ * Makes an edited generated-image message the prompt source for later image swipes.
+ * @param {number} messageId Edited message index.
+ */
+function onImagePromptMessageEdited(messageId) {
+    const context = getContext();
+    const message = context.chat[messageId];
+    const mediaAttachment = getImagePromptMedia(message);
+    if (!message || !mediaAttachment) {
+        return;
+    }
+
+    const snapshot = imagePromptEditSnapshots.get(message) ?? (
+        typeof message.extra?.sd_prompt_message === 'string'
+            ? { message: message.extra.sd_prompt_message, prompt: String(message.extra.sd_prompt ?? mediaAttachment.title ?? '') }
+            : null
+    );
+    imagePromptEditSnapshots.delete(message);
+    if (!snapshot) {
+        return;
+    }
+
+    const editedMessage = String(message.mes ?? '');
+    if (editedMessage === snapshot.message) {
+        return;
+    }
+
+    const editedPrompt = extractEditedImagePrompt(snapshot.message, editedMessage, snapshot.prompt);
+    message.extra.sd_prompt = editedPrompt;
+    message.extra.sd_prompt_message = editedMessage;
+    message.extra.sd_prompt_override = editedPrompt;
+}
 
 /**
  * "Paintbrush" button handler to generate a new image for a message.
@@ -5472,7 +6837,7 @@ async function generateMediaSwipe(mediaAttachment, message, onStart, onComplete,
 
     try {
         const callback = (_a, _b, _c, _d, _e, _f, format) => { result.type = isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE; };
-        const savedPrompt = mediaAttachment.title ?? message.extra.title ?? '';
+        const savedPrompt = message.extra.sd_prompt_override ?? mediaAttachment.title ?? message.extra.title ?? '';
         const savedNegative = mediaAttachment.negative ?? message.extra.negative ?? '';
         const refineArgs = {
             negative: savedNegative,
@@ -5992,6 +7357,7 @@ export async function init() {
     $('#sd_scale').on('input', onScaleInput);
     $('#sd_steps').on('input', onStepsInput);
     $('#sd_model').on('change', onModelChange);
+    $('#sd_lora').on('change', onLoraChange);
     $('#sd_vae').on('change', onVaeChange);
     $('#sd_sampler').on('change', onSamplerChange);
     $('#sd_resolution').on('change', onResolutionChange);
@@ -6023,6 +7389,7 @@ export async function init() {
     $('#sd_hr_upscaler').on('change', onHrUpscalerChange);
     $('#sd_hr_scale').on('input', onHrScaleInput);
     $('#sd_denoising_strength').on('input', onDenoisingStrengthInput);
+    $('#sd_lora_strength').on('input', onLoraStrengthInput);
     $('#sd_hr_second_pass_steps').on('input', onHrSecondPassStepsInput);
     $('#sd_novel_anlas_guard').on('input', onNovelAnlasGuardInput);
     $('#sd_novel_view_anlas').on('click', onViewAnlasClick);
@@ -6047,6 +7414,37 @@ export async function init() {
     $('#sd_delete_style').on('click', onDeleteStyleClick);
     $('#sd_preset_chain_add').on('click', onPresetChainAddClick);
     $('#sd_fallback_enabled').on('change', onFallbackEnabledChange);
+    $('#sd_ref_images_enabled').on('change', onRefImagesEnabledChange);
+    $('#sd_ref_images_add').on('click', () => $('#sd_ref_images_file').trigger('click'));
+    $('#sd_ref_images_file').on('change', onRefImagesFileChange);
+    $('#sd_runpod_lazy_url').on('input', onRunpodLazyUrlInput);
+    $('#sd_runpod_warmup').on('click', () => runpodControl('warmup'));
+    $('#sd_runpod_shutdown').on('click', () => runpodControl('shutdown'));
+    // Copy instead of navigate: RunPod's WAF 403s any cross-site link click
+    // (Sec-Fetch-Site: cross-site); only direct/pasted navigations pass.
+    $('#sd_runpod_open').on('click', async function () {
+        const url = this.dataset.url;
+        if (!url) {
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(url);
+            toastr.info(t`ComfyUI URL copied — paste it into a new browser tab.`, t`Image Generation`);
+        } catch {
+            window.prompt('Copy the ComfyUI URL:', url);
+        }
+    });
+    $('#sd_runpod_models_add').on('click', onRunpodModelsAddClick);
+    $('#sd_custom_entry_add').on('click', onAddCustomEntryClick);
+    $('#sd_custom_entries_list').on('click', '[data-action]', function () {
+        const id = $(this).attr('data-entry-id');
+        const action = $(this).attr('data-action');
+        if (action === 'edit') {
+            onEditCustomEntryClick(id);
+        } else if (action === 'delete') {
+            onDeleteCustomEntryClick(id);
+        }
+    });
     $('#sd_character_prompt_block').hide();
     $('#sd_interactive_mode').on('input', onInteractiveModeInput);
     $('#sd_openai_style').on('change', onOpenAiStyleSelect);
@@ -6116,6 +7514,7 @@ export async function init() {
     });
 
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
+    eventSource.on(event_types.MESSAGE_EDITED, onImagePromptMessageEdited);
     eventSource.on(event_types.IMAGE_SWIPED, onImageSwiped);
 
     [event_types.SECRET_WRITTEN, event_types.SECRET_DELETED, event_types.SECRET_ROTATED].forEach(event => {
