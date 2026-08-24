@@ -6,6 +6,7 @@ Included features:
 
 - Ordered provider fallback across every image backend supported by SillyTavern.
 - RunPod on-demand pod status, warm-up, shutdown, copy-URL, model catalog, and chat-bar status control.
+- Cold RunPod presets expose canonical ComfyUI sampler and scheduler choices without starting the pod; saved custom values remain available.
 - Tagged reference-image library with automatic LLM selection and `%reference_image%` ComfyUI workflow injection.
 - Editable generated-image prompts: edit the image message, then swipe right to generate from the revised prompt.
 - Per-workflow model, text-encoder, VAE, and LoRA selection plus configurable LoRA strength. ComfyUI workflows can use `%text_encoder%`, with the workflow editor visibly reporting whether the placeholder is present.

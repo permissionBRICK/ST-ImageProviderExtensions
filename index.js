@@ -65,6 +65,7 @@ import { oai_settings } from '../../../openai.js';
 import { power_user } from '/scripts/power-user.js';
 import { MacrosParser } from '/scripts/macros.js';
 import { ActionLoaderHandle, loader } from '/scripts/action-loader.js';
+import { COMFY_DEFAULT_SAMPLERS, COMFY_DEFAULT_SCHEDULERS, getColdRunpodOptions } from './comfy-defaults.js';
 
 export { MODULE_NAME };
 
@@ -3272,7 +3273,7 @@ async function loadComfySamplers() {
     }
     if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
         // Do not query /object_info through a cold lazy proxy on page load.
-        return extension_settings.sd.sampler ? [extension_settings.sd.sampler] : [];
+        return getColdRunpodOptions(COMFY_DEFAULT_SAMPLERS, extension_settings.sd.sampler);
     }
     if (!extension_settings.sd.comfy_url) {
         return [];
@@ -4043,7 +4044,7 @@ async function loadComfySchedulers() {
     }
     if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
         // Do not query /object_info through a cold lazy proxy on page load.
-        return extension_settings.sd.scheduler ? [extension_settings.sd.scheduler] : [];
+        return getColdRunpodOptions(COMFY_DEFAULT_SCHEDULERS, extension_settings.sd.scheduler);
     }
     if (!extension_settings.sd.comfy_url) {
         return [];
