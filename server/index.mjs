@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 
 export const COMFY_METADATA_TIMEOUT_MS = 15000;
 export const COMFY_METADATA_CACHE_TTL_MS = 30000;
-const SUPPORTED_KINDS = new Set(['ping', 'samplers', 'models', 'schedulers', 'vaes', 'loras']);
+const SUPPORTED_KINDS = new Set(['ping', 'samplers', 'models', 'schedulers', 'vaes', 'loras', 'text_encoders']);
 const apiRouter = express.Router();
 const objectInfoStores = new WeakMap();
 
@@ -23,14 +23,34 @@ function uniqueStrings(values) {
 }
 
 function getEnumValues(node, inputName) {
-    const values = node?.input?.required?.[inputName]?.[0];
-    return Array.isArray(values) ? values : [];
+    const definition = node?.input?.required?.[inputName];
+    const values = definition?.[0];
+    if (Array.isArray(values)) {
+        return values;
+    }
+    const comboOptions = definition?.[1]?.options;
+    return values === 'COMBO' && Array.isArray(comboOptions) ? comboOptions : [];
 }
 
 function collectEnumValues(data, inputName, preferredNodes = []) {
     const preferred = preferredNodes.flatMap(nodeName => getEnumValues(data?.[nodeName], inputName));
     const discovered = Object.values(data ?? {}).flatMap(node => getEnumValues(node, inputName));
     return uniqueStrings([...preferred, ...discovered]);
+}
+
+function collectTextEncoderValues(data) {
+    const values = [];
+    for (const [nodeName, node] of Object.entries(data ?? {})) {
+        if (!/(?:CLIP|TextEncoder).*Loader/i.test(nodeName) || /(?:Vision|Audio)/i.test(nodeName)) {
+            continue;
+        }
+        for (const inputName of Object.keys(node?.input?.required ?? {})) {
+            if (/^clip_name\d*$/i.test(inputName) || /^text_encoder(?:_name)?$/i.test(inputName)) {
+                values.push(...getEnumValues(node, inputName));
+            }
+        }
+    }
+    return uniqueStrings(values);
 }
 
 function parseObjectInfo(kind, data) {
@@ -54,6 +74,8 @@ function parseObjectInfo(kind, data) {
             return collectEnumValues(data, 'vae_name', ['VAELoader']);
         case 'loras':
             return collectEnumValues(data, 'lora_name', ['LoraLoader']);
+        case 'text_encoders':
+            return collectTextEncoderValues(data);
         default:
             throw new Error(`Unsupported ComfyUI metadata kind: ${kind}`);
     }
@@ -160,6 +182,7 @@ apiRouter.get('/capabilities', (_request, response) => {
         timeoutMs: COMFY_METADATA_TIMEOUT_MS,
         cacheTtlMs: COMFY_METADATA_CACHE_TTL_MS,
         coalescedObjectInfo: true,
+        textEncoderDiscovery: true,
     });
 });
 

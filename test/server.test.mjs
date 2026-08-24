@@ -10,6 +10,9 @@ const objectInfo = {
     UnetLoaderGGUF: { input: { required: { unet_name: [['flux_q4.gguf']] } } },
     VAELoader: { input: { required: { vae_name: [['ae.safetensors']] } } },
     LoraLoader: { input: { required: { lora_name: [['detail.safetensors']] } } },
+    CLIPLoader: { input: { required: { clip_name: [['clip_l.safetensors']] } } },
+    DualCLIPLoaderGGUF: { input: { required: { clip_name1: ['COMBO', { options: ['t5xxl.gguf'] }], clip_name2: [['clip_l.safetensors']] } } },
+    CLIPVisionLoader: { input: { required: { clip_name: [['vision_encoder.safetensors']] } } },
 };
 
 let server;
@@ -34,6 +37,7 @@ before(async () => {
                     CustomVaeNode: { input: { required: { vae_name: [['custom_vae.safetensors']] } } },
                     CustomLoraNode: { input: { required: { lora_name: [['custom_lora.safetensors']] } } },
                     CustomCheckpointNode: { input: { required: { ckpt_name: [['custom_model.safetensors']] } } },
+                    CustomTextEncoderLoader: { input: { required: { text_encoder_name: ['COMBO', { options: ['custom_encoder.safetensors'] }] } } },
                 })), 20);
         }
         response.statusCode = 404;
@@ -53,6 +57,7 @@ test('reads ComfyUI status and every metadata type', async () => {
     assert.deepEqual(await readComfyMetadata('schedulers', baseUrl), ['normal']);
     assert.deepEqual(await readComfyMetadata('vaes', baseUrl), ['ae.safetensors']);
     assert.deepEqual(await readComfyMetadata('loras', baseUrl), ['detail.safetensors']);
+    assert.deepEqual(await readComfyMetadata('text_encoders', baseUrl), ['clip_l.safetensors', 't5xxl.gguf']);
     assert.deepEqual(await readComfyMetadata('models', baseUrl), [
         { value: 'base_model.safetensors', text: 'base model' },
         { value: 'flux_dev.safetensors', text: 'UNet: flux dev' },
@@ -63,18 +68,20 @@ test('reads ComfyUI status and every metadata type', async () => {
 
 test('coalesces concurrent object_info requests and discovers custom loader nodes', async () => {
     const customUrl = `${baseUrl.replace(/\/comfy$/, '')}/custom`;
-    const [samplers, schedulers, vaes, loras, models] = await Promise.all([
+    const [samplers, schedulers, vaes, loras, models, encoders] = await Promise.all([
         readComfyMetadata('samplers', customUrl),
         readComfyMetadata('schedulers', customUrl),
         readComfyMetadata('vaes', customUrl),
         readComfyMetadata('loras', customUrl),
         readComfyMetadata('models', customUrl),
+        readComfyMetadata('text_encoders', customUrl),
     ]);
     assert.deepEqual(samplers, ['custom_sampler']);
     assert.deepEqual(schedulers, ['custom_scheduler']);
     assert.deepEqual(vaes, ['custom_vae.safetensors']);
     assert.deepEqual(loras, ['custom_lora.safetensors']);
     assert.deepEqual(models, [{ value: 'custom_model.safetensors', text: 'custom model' }]);
+    assert.deepEqual(encoders, ['custom_encoder.safetensors']);
     assert.equal(customObjectInfoRequests, 1, 'concurrent metadata loads coalesce into one request');
 });
 

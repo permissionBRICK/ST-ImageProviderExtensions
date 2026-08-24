@@ -8,10 +8,10 @@ Included features:
 - RunPod on-demand pod status, warm-up, shutdown, copy-URL, model catalog, and chat-bar status control.
 - Tagged reference-image library with automatic LLM selection and `%reference_image%` ComfyUI workflow injection.
 - Editable generated-image prompts: edit the image message, then swipe right to generate from the revised prompt.
-- Per-workflow model, VAE, and LoRA memory plus configurable LoRA strength.
+- Per-workflow model, text-encoder, VAE, and LoRA selection plus configurable LoRA strength. ComfyUI workflows can use `%text_encoder%`, and the settings/editor UI visibly reports whether the active workflow contains that placeholder.
 - Custom image-wand entries and the extended image-generation settings UI.
 - Integrated Connection Manager profile selection for routing image-prompt generation through a cheaper LLM while preserving full chat context, then restoring the chat profile.
-- Bundled server plugin for bounded ComfyUI discovery (models, samplers, schedulers, VAEs, and LoRAs), so no SillyTavern source patch is required. Discovery coalesces simultaneous option loads into one cached `/object_info` request, allows 15 seconds for large custom-node installations, and recognizes compatible custom loader nodes by their input types.
+- Bundled server plugin for bounded ComfyUI discovery (models, text encoders, samplers, schedulers, VAEs, and LoRAs), so no SillyTavern source patch is required. Discovery coalesces simultaneous option loads into one cached `/object_info` request, allows 15 seconds for large custom-node installations, and recognizes compatible custom loader nodes by their input types.
 - Optional RunPod lazy-proxy backend published separately as [`ST-RunPodProxy`](https://github.com/permissionBRICK/ST-RunPodProxy).
 
 Save complete image-provider configurations—OpenRouter, xAI, OpenAI, ComfyUI, Stable Diffusion WebUI, and the other providers supported by SillyTavern—then order them from preferred to last resort. If one request is unavailable, rejected by provider guidelines, or otherwise fails, the same prompt is tried against the next entry. Live settings are restored after every chain run.

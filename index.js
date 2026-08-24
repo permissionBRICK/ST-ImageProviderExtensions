@@ -387,12 +387,14 @@ const defaultSettings = {
 
     // Selected LoRA for comfy workflows using the %lora% placeholder
     lora: '',
+    // Selected text encoder for comfy workflows using the %text_encoder% placeholder
+    text_encoder: '',
     lora_strength: 1.0,
     lora_strength_min: 0.0,
     lora_strength_max: 2.0,
     lora_strength_step: 0.01,
 
-    // Per-workflow remembered selections ({ [workflow]: { model, lora } });
+    // Per-workflow remembered selections ({ [workflow]: { model, lora, text_encoder } });
     // part of preset snapshots, so each chain provider keeps its own map.
     comfy_workflow_prefs: {},
 
@@ -748,6 +750,10 @@ async function loadSettings() {
         extension_settings.sd.lora = '';
     }
 
+    if (extension_settings.sd.text_encoder === undefined) {
+        extension_settings.sd.text_encoder = '';
+    }
+
     if (typeof extension_settings.sd.lora_strength !== 'number') {
         extension_settings.sd.lora_strength = 1.0;
     }
@@ -899,8 +905,55 @@ async function loadSettingOptions() {
         loadSchedulers(),
         loadVaes(),
         loadLoras(),
+        loadTextEncoders(),
         loadComfyWorkflows(),
     ]);
+}
+
+async function loadTextEncoders() {
+    $('#sd_text_encoder').empty();
+    let encoders = ['N/A'];
+    if (extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type === comfyTypes.standard) {
+        encoders = await loadComfyTextEncoders();
+    }
+    for (const encoder of encoders) {
+        const option = document.createElement('option');
+        option.innerText = encoder?.text ?? encoder;
+        option.value = encoder?.value ?? encoder;
+        option.selected = option.value === extension_settings.sd.text_encoder;
+        $('#sd_text_encoder').append(option);
+    }
+    const values = encoders.map(encoder => encoder?.value ?? encoder);
+    if (values.length > 0 && values[0] !== 'N/A' && !values.includes(extension_settings.sd.text_encoder)) {
+        extension_settings.sd.text_encoder = values[0];
+        $('#sd_text_encoder').val(extension_settings.sd.text_encoder).trigger('change');
+    }
+}
+
+async function loadComfyTextEncoders() {
+    if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+        const encoders = getRunpodCatalog()
+            .flatMap(model => parseRunpodFiles(model.downloads))
+            .filter(file => /^(?:clip|text_encoders?)\//i.test(file.dest))
+            .map(file => file.dest.split('/').pop());
+        return [...new Set(encoders)];
+    }
+    if (!extension_settings.sd.comfy_url) {
+        return [];
+    }
+    try {
+        const result = await fetch(`${COMFY_METADATA_API}/text_encoders`, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ url: extension_settings.sd.comfy_url }),
+        });
+        if (!result.ok) {
+            throw new Error('ComfyUI returned an error.');
+        }
+        return await result.json();
+    } catch (error) {
+        return [];
+    }
 }
 
 async function loadLoras() {
@@ -2577,9 +2630,9 @@ function onHFModelInput() {
 }
 
 /**
- * Stores the current model/lora choice for the active comfy workflow, so
+ * Stores the current model/LoRA/text-encoder choice for the active comfy workflow, so
  * switching back to this workflow restores it (per provider via presets).
- * @param {'model'|'lora'} key Which selection to remember.
+ * @param {'model'|'lora'|'text_encoder'} key Which selection to remember.
  * @param {string} value Selected value.
  */
 function rememberWorkflowPref(key, value) {
@@ -2599,6 +2652,12 @@ async function onLoraChange() {
     }
 }
 
+function onTextEncoderChange() {
+    extension_settings.sd.text_encoder = $('#sd_text_encoder').find(':selected').val();
+    rememberWorkflowPref('text_encoder', extension_settings.sd.text_encoder);
+    saveSettingsDebounced();
+}
+
 function onComfyWorkflowChange() {
     extension_settings.sd.comfy_workflow = $('#sd_comfy_workflow').find(':selected').val();
     // Restore the model/lora remembered for this workflow (auto-configuration
@@ -2613,11 +2672,16 @@ function onComfyWorkflowChange() {
             extension_settings.sd.lora = pref.lora;
             $('#sd_lora').val(pref.lora);
         }
+        if (pref.text_encoder !== undefined) {
+            extension_settings.sd.text_encoder = pref.text_encoder;
+            $('#sd_text_encoder').val(pref.text_encoder);
+        }
         if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
             pushRunpodCatalog();
         }
     }
     saveSettingsDebounced();
+    updateTextEncoderPlaceholderIndicator();
 }
 
 function onBflUpsamplingInput() {
@@ -4183,9 +4247,43 @@ async function loadComfyWorkflows() {
             option.selected = workflow === extension_settings.sd.comfy_workflow;
             $('#sd_comfy_workflow').append(option);
         }
+        await updateTextEncoderPlaceholderIndicator();
     } catch (error) {
         console.error(`Could not load ComfyUI workflows: ${error.message}`);
     }
+}
+
+async function updateTextEncoderPlaceholderIndicator(workflowText = null) {
+    const indicator = $('#sd_text_encoder_placeholder_status');
+    if (!indicator.length) {
+        return;
+    }
+    const workflowName = extension_settings.sd.comfy_workflow;
+    let found = false;
+    try {
+        if (workflowText === null && workflowName) {
+            const response = await fetch('/api/sd/comfy/workflow', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ file_name: workflowName }),
+            });
+            if (response.ok) {
+                workflowText = await response.json();
+            }
+        }
+        if (workflowName !== extension_settings.sd.comfy_workflow) {
+            return;
+        }
+        found = String(workflowText ?? '').includes('"%text_encoder%"');
+    } catch {
+        found = false;
+    }
+    indicator.toggleClass('sd_placeholder_present', found)
+        .toggleClass('sd_placeholder_missing', !found)
+        .attr('title', found
+            ? 'The current workflow uses %text_encoder%.'
+            : 'The current workflow does not use %text_encoder%; the selected encoder will have no effect.');
+    indicator.find('i').toggleClass('fa-circle-check', found).toggleClass('fa-circle-exclamation', !found);
 }
 
 function getGenerationType(prompt) {
@@ -4348,6 +4446,7 @@ async function generatePicture(initiator, args, trigger, message, callback) {
 
     ensureSelectionExists('sampler', '#sd_sampler');
     ensureSelectionExists('model', '#sd_model');
+    ensureSelectionExists('text_encoder', '#sd_text_encoder');
 
     trigger = trigger.trim();
     const generationType = getGenerationType(trigger);
@@ -5811,6 +5910,7 @@ async function generateComfyImage(prompt, negativePrompt, signal) {
     }
     const placeholders = [
         'model',
+        'text_encoder',
         'vae',
         'lora',
         'lora_strength',
@@ -6360,6 +6460,8 @@ async function onComfyOpenWorkflowEditorClick() {
         if (!response.ok) {
             const text = await response.text();
             toastr.error(`Failed to save workflow.\n\n${text}`);
+        } else {
+            await updateTextEncoderPlaceholderIndicator(workflow);
         }
     }
 }
@@ -7042,6 +7144,7 @@ function applyCommandArguments(args) {
         'cfg': 'scale',
         'skip': 'clip_skip',
         'model': 'model',
+        'encoder': 'text_encoder',
         'sampler': 'sampler',
         'scheduler': 'scheduler',
         'vae': 'vae',
@@ -7280,6 +7383,15 @@ export async function init() {
                 enumProvider: getSelectEnumProvider('sd_model', true),
             }),
             SlashCommandNamedArgument.fromProps({
+                name: 'encoder',
+                description: 'ComfyUI text encoder override',
+                isRequired: false,
+                typeList: [ARGUMENT_TYPE.STRING],
+                acceptsMultiple: false,
+                forceEnum: true,
+                enumProvider: getSelectEnumProvider('sd_text_encoder', true),
+            }),
+            SlashCommandNamedArgument.fromProps({
                 name: 'sampler',
                 description: 'sampler override',
                 isRequired: false,
@@ -7454,6 +7566,7 @@ export async function init() {
     $('#sd_steps').on('input', onStepsInput);
     $('#sd_model').on('change', onModelChange);
     $('#sd_lora').on('change', onLoraChange);
+    $('#sd_text_encoder').on('change', onTextEncoderChange);
     $('#sd_vae').on('change', onVaeChange);
     $('#sd_sampler').on('change', onSamplerChange);
     $('#sd_resolution').on('change', onResolutionChange);
