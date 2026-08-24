@@ -2748,7 +2748,8 @@ async function validateComfyUrl() {
             }),
         });
         if (!result.ok) {
-            throw new Error('ComfyUI returned an error.');
+            const body = await result.json().catch(() => null);
+            throw new Error(body?.error || `ComfyUI returned HTTP ${result.status}.`);
         }
 
         await loadSettingOptions();

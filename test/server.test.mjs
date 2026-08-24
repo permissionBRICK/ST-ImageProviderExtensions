@@ -14,6 +14,8 @@ const objectInfo = {
 
 let server;
 let baseUrl;
+let objectInfoRequests = 0;
+let customObjectInfoRequests = 0;
 
 before(async () => {
     server = http.createServer((request, response) => {
@@ -22,7 +24,17 @@ before(async () => {
             return response.end('{}');
         }
         if (request.url === '/comfy/object_info') {
+            objectInfoRequests++;
             return response.end(JSON.stringify(objectInfo));
+        }
+        if (request.url === '/custom/object_info') {
+            customObjectInfoRequests++;
+            return setTimeout(() => response.end(JSON.stringify({
+                    CustomSamplerNode: { input: { required: { sampler_name: [['custom_sampler']], scheduler: [['custom_scheduler']] } } },
+                    CustomVaeNode: { input: { required: { vae_name: [['custom_vae.safetensors']] } } },
+                    CustomLoraNode: { input: { required: { lora_name: [['custom_lora.safetensors']] } } },
+                    CustomCheckpointNode: { input: { required: { ckpt_name: [['custom_model.safetensors']] } } },
+                })), 20);
         }
         response.statusCode = 404;
         response.end('{}');
@@ -46,6 +58,24 @@ test('reads ComfyUI status and every metadata type', async () => {
         { value: 'flux_dev.safetensors', text: 'UNet: flux dev' },
         { value: 'flux_q4.gguf', text: 'GGUF: flux q4' },
     ]);
+    assert.equal(objectInfoRequests, 1, 'all metadata kinds reuse one object_info response');
+});
+
+test('coalesces concurrent object_info requests and discovers custom loader nodes', async () => {
+    const customUrl = `${baseUrl.replace(/\/comfy$/, '')}/custom`;
+    const [samplers, schedulers, vaes, loras, models] = await Promise.all([
+        readComfyMetadata('samplers', customUrl),
+        readComfyMetadata('schedulers', customUrl),
+        readComfyMetadata('vaes', customUrl),
+        readComfyMetadata('loras', customUrl),
+        readComfyMetadata('models', customUrl),
+    ]);
+    assert.deepEqual(samplers, ['custom_sampler']);
+    assert.deepEqual(schedulers, ['custom_scheduler']);
+    assert.deepEqual(vaes, ['custom_vae.safetensors']);
+    assert.deepEqual(loras, ['custom_lora.safetensors']);
+    assert.deepEqual(models, [{ value: 'custom_model.safetensors', text: 'custom model' }]);
+    assert.equal(customObjectInfoRequests, 1, 'concurrent metadata loads coalesce into one request');
 });
 
 test('rejects unsupported metadata kinds and protocols', async () => {

@@ -11,7 +11,7 @@ Included features:
 - Per-workflow model, VAE, and LoRA memory plus configurable LoRA strength.
 - Custom image-wand entries and the extended image-generation settings UI.
 - Integrated Connection Manager profile selection for routing image-prompt generation through a cheaper LLM while preserving full chat context, then restoring the chat profile.
-- Bundled server plugin for five-second-bounded ComfyUI discovery (models, samplers, schedulers, VAEs, and LoRAs), so no SillyTavern source patch is required.
+- Bundled server plugin for bounded ComfyUI discovery (models, samplers, schedulers, VAEs, and LoRAs), so no SillyTavern source patch is required. Discovery coalesces simultaneous option loads into one cached `/object_info` request, allows 15 seconds for large custom-node installations, and recognizes compatible custom loader nodes by their input types.
 - Optional RunPod lazy-proxy backend published separately as [`ST-RunPodProxy`](https://github.com/permissionBRICK/ST-RunPodProxy).
 
 Save complete image-provider configurations—OpenRouter, xAI, OpenAI, ComfyUI, Stable Diffusion WebUI, and the other providers supported by SillyTavern—then order them from preferred to last resort. If one request is unavailable, rejected by provider guidelines, or otherwise fails, the same prompt is tried against the next entry. Live settings are restored after every chain run.
