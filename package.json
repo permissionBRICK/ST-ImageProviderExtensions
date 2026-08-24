@@ -1,0 +1,1 @@
+{"name":"st-image-provider-fallback","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node --check index.js && node test/validate.mjs"}}

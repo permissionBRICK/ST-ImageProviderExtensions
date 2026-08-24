@@ -1,0 +1,18 @@
+{
+    "display_name": "Image Generation: Provider Fallback",
+    "loading_order": 10,
+    "requires": [],
+    "optional": [
+        "sd"
+    ],
+    "generate_interceptor": "SD_ProcessTriggers",
+    "js": "index.js",
+    "css": "style.css",
+    "author": "SillyTavern contributors and permissionBRICK",
+    "version": "1.0.0",
+    "homePage": "https://github.com/permissionBRICK/ST-ImageProviderFallback",
+    "minimum_client_version": "1.18.0",
+    "hooks": {
+        "activate": "init"
+    }
+}
