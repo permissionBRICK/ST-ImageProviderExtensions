@@ -2681,7 +2681,6 @@ function onComfyWorkflowChange() {
         }
     }
     saveSettingsDebounced();
-    updateTextEncoderPlaceholderIndicator();
 }
 
 function onBflUpsamplingInput() {
@@ -4247,43 +4246,9 @@ async function loadComfyWorkflows() {
             option.selected = workflow === extension_settings.sd.comfy_workflow;
             $('#sd_comfy_workflow').append(option);
         }
-        await updateTextEncoderPlaceholderIndicator();
     } catch (error) {
         console.error(`Could not load ComfyUI workflows: ${error.message}`);
     }
-}
-
-async function updateTextEncoderPlaceholderIndicator(workflowText = null) {
-    const indicator = $('#sd_text_encoder_placeholder_status');
-    if (!indicator.length) {
-        return;
-    }
-    const workflowName = extension_settings.sd.comfy_workflow;
-    let found = false;
-    try {
-        if (workflowText === null && workflowName) {
-            const response = await fetch('/api/sd/comfy/workflow', {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: JSON.stringify({ file_name: workflowName }),
-            });
-            if (response.ok) {
-                workflowText = await response.json();
-            }
-        }
-        if (workflowName !== extension_settings.sd.comfy_workflow) {
-            return;
-        }
-        found = String(workflowText ?? '').includes('"%text_encoder%"');
-    } catch {
-        found = false;
-    }
-    indicator.toggleClass('sd_placeholder_present', found)
-        .toggleClass('sd_placeholder_missing', !found)
-        .attr('title', found
-            ? 'The current workflow uses %text_encoder%.'
-            : 'The current workflow does not use %text_encoder%; the selected encoder will have no effect.');
-    indicator.find('i').toggleClass('fa-circle-check', found).toggleClass('fa-circle-exclamation', !found);
 }
 
 function getGenerationType(prompt) {
@@ -6460,8 +6425,6 @@ async function onComfyOpenWorkflowEditorClick() {
         if (!response.ok) {
             const text = await response.text();
             toastr.error(`Failed to save workflow.\n\n${text}`);
-        } else {
-            await updateTextEncoderPlaceholderIndicator(workflow);
         }
     }
 }

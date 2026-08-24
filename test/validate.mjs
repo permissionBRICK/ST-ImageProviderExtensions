@@ -11,7 +11,7 @@ const workflowEditor = fs.readFileSync(new URL('../comfyWorkflowEditor.html', im
 for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 'renderRunpodModels', 'renderCustomEntriesList', 'withConnectionProfile', 'TEMPORARY_CONNECTION_STARTED', 'LEGACY_IMAGE_PROMPT_PROFILE_MODULE', 'rememberImagePromptBeforeEdit', 'onImagePromptMessageEdited', 'sd_prompt_override', 'IMAGE_SWIPED']) {
     assert.ok(source.includes(marker), `missing custom image feature: ${marker}`);
 }
-for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_text_encoder', 'sd_text_encoder_placeholder_status', 'sd_custom_entry_add', 'sd_prompt_generation_profile']) {
+for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_text_encoder', 'sd_custom_entry_add', 'sd_prompt_generation_profile']) {
     assert.ok(settings.includes(marker), `missing custom image setting: ${marker}`);
 }
 assert.ok(source.includes("third-party/ST-ImageProviderExtensions/comfyWorkflowEditor.html"));

@@ -63,23 +63,6 @@
     margin: 0;
 }
 
-.sd_workflow_placeholder_status {
-    cursor: help;
-    font-size: smaller;
-    font-weight: normal;
-    opacity: 0.75;
-    white-space: nowrap;
-}
-
-.sd_workflow_placeholder_status.sd_placeholder_present {
-    color: #5cb85c;
-    opacity: 1;
-}
-
-.sd_workflow_placeholder_status.sd_placeholder_missing {
-    color: #f0ad4e;
-}
-
 .sd_comfy_workflow_editor_custom_remove, #sd_comfy_workflow_editor_placeholder_add {
     cursor: pointer;
     font-weight: bold;
