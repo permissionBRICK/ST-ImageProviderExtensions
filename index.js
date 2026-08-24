@@ -70,6 +70,11 @@ export { MODULE_NAME };
 
 const MODULE_NAME = 'sd';
 const LEGACY_IMAGE_PROMPT_PROFILE_MODULE = 'ST-ImagePromptProfiles';
+const COMFY_METADATA_API = '/api/plugins/image-provider-extensions/comfy';
+// Shared event names used by Token Saver and Summarize Profiles. Keeping these
+// local makes the extension work on an unmodified SillyTavern client.
+const TEMPORARY_CONNECTION_STARTED = 'st-token-saver:temporary-connection-started';
+const TEMPORARY_CONNECTION_ENDED = 'st-token-saver:temporary-connection-ended';
 // This is a 1x1 transparent PNG
 const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
@@ -518,7 +523,7 @@ async function isCurrentSourceReachable() {
             if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
                 return isRunpodReady(SOURCE_PROBE_TIMEOUT_MS);
             }
-            return probe('/api/sd/comfy/ping', { url: extension_settings.sd.comfy_url });
+            return probe(`${COMFY_METADATA_API}/ping`, { url: extension_settings.sd.comfy_url });
         case sources.auto:
         case sources.vlad:
         case sources.drawthings:
@@ -921,7 +926,7 @@ async function loadComfyLoras() {
         return [];
     }
     try {
-        const result = await fetch('/api/sd/comfy/loras', {
+        const result = await fetch(`${COMFY_METADATA_API}/loras`, {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({ url: extension_settings.sd.comfy_url }),
@@ -2735,7 +2740,7 @@ async function validateComfyUrl() {
             throw new Error('URL is not set.');
         }
 
-        const result = await fetch('/api/sd/comfy/ping', {
+        const result = await fetch(`${COMFY_METADATA_API}/ping`, {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -3210,7 +3215,7 @@ async function loadComfySamplers() {
     }
 
     try {
-        const result = await fetch('/api/sd/comfy/samplers', {
+        const result = await fetch(`${COMFY_METADATA_API}/samplers`, {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -3859,7 +3864,7 @@ async function loadComfyModels() {
     }
 
     try {
-        const result = await fetch('/api/sd/comfy/models', {
+        const result = await fetch(`${COMFY_METADATA_API}/models`, {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -3981,7 +3986,7 @@ async function loadComfySchedulers() {
     }
 
     try {
-        const result = await fetch('/api/sd/comfy/schedulers', {
+        const result = await fetch(`${COMFY_METADATA_API}/schedulers`, {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -4140,7 +4145,7 @@ async function loadComfyVaes() {
     }
 
     try {
-        const result = await fetch('/api/sd/comfy/vaes', {
+        const result = await fetch(`${COMFY_METADATA_API}/vaes`, {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -4714,7 +4719,7 @@ async function withConnectionProfile(targetProfileId, callback) {
         await waitUntilCondition(() => online_status !== 'no_connection', 10000, 100, { rejectOnTimeout: false });
     };
 
-    await eventSource.emit(event_types.CONNECTION_PROFILE_TEMPORARY_STARTED);
+    await eventSource.emit(TEMPORARY_CONNECTION_STARTED);
     try {
         await switchToProfile(targetProfileId);
         return await callback();
@@ -4724,7 +4729,7 @@ async function withConnectionProfile(targetProfileId, callback) {
         } catch (error) {
             console.error('SD: failed to restore the previous connection profile after image-prompt generation', error);
         } finally {
-            await eventSource.emit(event_types.CONNECTION_PROFILE_TEMPORARY_ENDED);
+            await eventSource.emit(TEMPORARY_CONNECTION_ENDED);
         }
     }
 }

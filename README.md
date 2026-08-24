@@ -11,6 +11,8 @@ Included features:
 - Per-workflow model, VAE, and LoRA memory plus configurable LoRA strength.
 - Custom image-wand entries and the extended image-generation settings UI.
 - Integrated Connection Manager profile selection for routing image-prompt generation through a cheaper LLM while preserving full chat context, then restoring the chat profile.
+- Bundled server plugin for five-second-bounded ComfyUI discovery (models, samplers, schedulers, VAEs, and LoRAs), so no SillyTavern source patch is required.
+- Optional RunPod lazy-proxy backend published separately as [`ST-RunPodProxy`](https://github.com/permissionBRICK/ST-RunPodProxy).
 
 Save complete image-provider configurations—OpenRouter, xAI, OpenAI, ComfyUI, Stable Diffusion WebUI, and the other providers supported by SillyTavern—then order them from preferred to last resort. If one request is unavailable, rejected by provider guidelines, or otherwise fails, the same prompt is tried against the next entry. Live settings are restored after every chain run.
 
@@ -23,11 +25,29 @@ Save complete image-provider configurations—OpenRouter, xAI, OpenAI, ComfyUI, 
 https://github.com/permissionBRICK/ST-ImageProviderExtensions
 ```
 
-3. Restart/reload SillyTavern. Configure providers under **Image Generation**, and use **Add current settings** to build a fallback chain if desired.
+3. Enable server plugins in `config.yaml`:
+
+   ```yaml
+   enableServerPlugins: true
+   ```
+
+4. From the SillyTavern directory, install this same repository as the server companion and restart SillyTavern:
+
+   ```bash
+   node plugins.js install https://github.com/permissionBRICK/ST-ImageProviderExtensions
+   ```
+
+5. Reload SillyTavern. Configure providers under **Image Generation**, and use **Add current settings** to build a fallback chain if desired.
 
 Existing `extension_settings.sd` settings are reused. Legacy Primary/Secondary fallback settings are migrated automatically.
 
 If `ST-ImagePromptProfiles` was previously installed, its selected profile is migrated automatically. Disable or uninstall that extension after updating to 2.0.0; it is no longer needed.
+
+The same repository is installed in both supported SillyTavern locations: the browser extension supplies the UI/generation logic, and the server plugin supplies bounded ComfyUI metadata and LoRA discovery. The extension does not patch SillyTavern source files.
+
+## RunPod lazy proxy
+
+Install [`permissionBRICK/ST-RunPodProxy`](https://github.com/permissionBRICK/ST-RunPodProxy) for the on-demand backend used by the extension's warm-up, shutdown, model-catalog, heartbeat, and provider-fallback controls. It ships a Docker image and Unraid template for normal automatic updates. RunPod, Hugging Face, Civitai, and GitHub tokens stay in the proxy service environment; they are never committed or stored in browser extension settings.
 
 ## Image-prompt cost routing
 

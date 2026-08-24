@@ -1,1 +1,1 @@
-{"name":"st-image-provider-extensions","version":"2.0.0","private":true,"type":"module","scripts":{"test":"node --check index.js && node test/validate.mjs"}}
+{"name":"st-image-provider-extensions","version":"2.1.0","private":true,"type":"module","main":"server/index.mjs","scripts":{"test":"node --check index.js && node --check server/index.mjs && node --test test/*.test.mjs && node test/validate.mjs"},"dependencies":{"express":"^5.1.0","node-fetch":"^3.3.2"}}

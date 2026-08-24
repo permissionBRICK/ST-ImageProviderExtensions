@@ -3,10 +3,11 @@ import fs from 'node:fs';
 const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url)));
 assert.equal(manifest.generate_interceptor, 'SD_ProcessTriggers');
 for (const file of [manifest.js, manifest.css, 'settings.html', 'button.html', 'dropdown.html', 'README.md', 'LICENSE']) assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), file);
+assert.ok(fs.existsSync(new URL('../server/index.mjs', import.meta.url)), 'server/index.mjs');
 
 const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
 const settings = fs.readFileSync(new URL('../settings.html', import.meta.url), 'utf8');
-for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 'renderRunpodModels', 'renderCustomEntriesList', 'withConnectionProfile', 'CONNECTION_PROFILE_TEMPORARY_STARTED', 'LEGACY_IMAGE_PROMPT_PROFILE_MODULE', 'rememberImagePromptBeforeEdit', 'onImagePromptMessageEdited', 'sd_prompt_override', 'IMAGE_SWIPED']) {
+for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 'renderRunpodModels', 'renderCustomEntriesList', 'withConnectionProfile', 'TEMPORARY_CONNECTION_STARTED', 'LEGACY_IMAGE_PROMPT_PROFILE_MODULE', 'rememberImagePromptBeforeEdit', 'onImagePromptMessageEdited', 'sd_prompt_override', 'IMAGE_SWIPED']) {
     assert.ok(source.includes(marker), `missing custom image feature: ${marker}`);
 }
 for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_custom_entry_add', 'sd_prompt_generation_profile']) {
@@ -17,3 +18,7 @@ assert.ok(source.includes("renderExtensionTemplateAsync('third-party/ST-ImagePro
 assert.ok(!source.includes("renderExtensionTemplateAsync('stable-diffusion'"));
 assert.ok(manifest.dependencies.includes('connection-manager'));
 assert.ok(!source.includes('STImageGenerationHooks?.generatePrompt'), 'companion hook should be fully consolidated');
+assert.ok(source.includes("'st-token-saver:temporary-connection-started'"), 'temporary profile switches must pause Token Saver without a core patch');
+assert.ok(!source.includes('event_types.CONNECTION_PROFILE_TEMPORARY_STARTED'), 'must not require custom SillyTavern event constants');
+assert.ok(source.includes("'/api/plugins/image-provider-extensions/comfy'"), 'ComfyUI metadata must use the bundled server plugin');
+assert.ok(!source.includes("'/api/sd/comfy/loras'"), 'LoRA discovery must not require a SillyTavern server patch');
