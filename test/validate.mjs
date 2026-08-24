@@ -12,7 +12,7 @@ for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 're
 for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_custom_entry_add']) {
     assert.ok(settings.includes(marker), `missing custom image setting: ${marker}`);
 }
-assert.ok(source.includes("third-party/ST-ImageProviderFallback/comfyWorkflowEditor.html"));
-assert.ok(source.includes("renderExtensionTemplateAsync('third-party/ST-ImageProviderFallback'"));
+assert.ok(source.includes("third-party/ST-ImageProviderExtensions/comfyWorkflowEditor.html"));
+assert.ok(source.includes("renderExtensionTemplateAsync('third-party/ST-ImageProviderExtensions'"));
 assert.ok(!source.includes("renderExtensionTemplateAsync('stable-diffusion'"));
 assert.ok(!settings.includes('sd_prompt_generation_profile'), 'profile UI belongs to ST-ImagePromptProfiles');

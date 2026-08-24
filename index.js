@@ -6183,7 +6183,7 @@ async function onComfyOpenWorkflowEditorClick() {
             file_name: extension_settings.sd.comfy_workflow,
         }),
     })).json();
-    const editorHtml = $(await $.get('scripts/extensions/third-party/ST-ImageProviderFallback/comfyWorkflowEditor.html'));
+    const editorHtml = $(await $.get('scripts/extensions/third-party/ST-ImageProviderExtensions/comfyWorkflowEditor.html'));
     const saveValue = (/** @type {Popup} */ _popup) => {
         workflow = $('#sd_comfy_workflow_editor_workflow').val().toString();
         return true;
@@ -6438,8 +6438,8 @@ function getVisibilityByInitiator(initiator) {
 }
 
 async function addSDGenButtons() {
-    const buttonHtml = await renderExtensionTemplateAsync('third-party/ST-ImageProviderFallback', 'button');
-    const dropdownHtml = await renderExtensionTemplateAsync('third-party/ST-ImageProviderFallback', 'dropdown');
+    const buttonHtml = await renderExtensionTemplateAsync('third-party/ST-ImageProviderExtensions', 'button');
+    const dropdownHtml = await renderExtensionTemplateAsync('third-party/ST-ImageProviderExtensions', 'dropdown');
 
     $('#sd_wand_container').append(buttonHtml);
     $(document.body).append(dropdownHtml);
@@ -7351,7 +7351,7 @@ export async function init() {
     }));
 
 
-    const template = await renderExtensionTemplateAsync('third-party/ST-ImageProviderFallback', 'settings', defaultSettings);
+    const template = await renderExtensionTemplateAsync('third-party/ST-ImageProviderExtensions', 'settings', defaultSettings);
     $('#sd_container').append(template);
     $('#sd_source').on('change', onSourceChange);
     $('#sd_scale').on('input', onScaleInput);

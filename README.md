@@ -1,4 +1,4 @@
-# ST-ImageProviderFallback
+# ST-ImageProviderExtensions
 
 A drop-in replacement for SillyTavern’s built-in Image Generation extension. It preserves the full permissionBRICK image-generation feature set while packaging it as a normally installed extension.
 
@@ -19,7 +19,7 @@ Save complete image-provider configurations—OpenRouter, xAI, OpenAI, ComfyUI, 
 2. Open **Extensions → Install extension** and enter:
 
 ```text
-https://github.com/permissionBRICK/ST-ImageProviderFallback
+https://github.com/permissionBRICK/ST-ImageProviderExtensions
 ```
 
 3. Restart/reload SillyTavern. Configure providers under **Image Generation**, and use **Add current settings** to build a fallback chain if desired.
