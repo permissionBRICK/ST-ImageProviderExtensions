@@ -15,12 +15,15 @@ const READY_TIMEOUT_MS = Number(process.env.RUNPOD_BENCH_READY_TIMEOUT_SECONDS ?
 const key = process.env.RUNPOD_KEY ?? '';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-const candidates = [
+const allCandidates = [
     { label: 'RTX 5090', id: 'NVIDIA GeForce RTX 5090', clouds: ['COMMUNITY', 'SECURE'] },
     { label: 'RTX 4090', id: 'NVIDIA GeForce RTX 4090', clouds: ['COMMUNITY', 'SECURE'] },
+    { label: 'RTX A5000', id: 'NVIDIA RTX A5000', clouds: ['SECURE'] },
     { label: 'A40', id: 'NVIDIA A40', clouds: ['SECURE'] },
     { label: 'L40S', id: 'NVIDIA L40S', clouds: ['COMMUNITY', 'SECURE'] },
 ];
+const requestedLabels = new Set(String(process.env.RUNPOD_BENCH_GPUS ?? '').split(',').map(value => value.trim()).filter(Boolean));
+const candidates = requestedLabels.size ? allCandidates.filter(candidate => requestedLabels.has(candidate.label)) : allCandidates;
 
 const files = [
     { dest: 'checkpoints/lustifyNSFWCheckpoint_v10Krea2.safetensors', url: 'https://civitai.com/api/download/models/3112728?fileId=2996235' },
