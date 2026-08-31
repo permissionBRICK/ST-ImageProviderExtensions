@@ -13,11 +13,12 @@ function response(body = {}, status = 200) {
     };
 }
 
-test('managed Pod creation passes worker tokens and self-reaper settings, but not the account key', async () => {
+test('managed Pod creation passes worker tokens and a dedicated reaper key, but not the account key', async () => {
     const requests = [];
     const manager = new RunpodManager({
         env: {
             RUNPOD_KEY: 'account-secret',
+            RUNPOD_POD_TERMINATE_KEY: 'restricted-pod-delete-secret',
             HF_TOKEN: 'hf-secret',
             RUNPOD_SELF_REAP_SECONDS: '1200',
             RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS: '2400',
@@ -40,12 +41,32 @@ test('managed Pod creation passes worker tokens and self-reaper settings, but no
     assert.equal(body.env.HF_TOKEN, 'hf-secret');
     assert.equal(body.env.RUNPOD_SELF_REAP_SECONDS, '1200');
     assert.equal(body.env.RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS, '2400');
+    assert.equal(body.env.RUNPOD_TERMINATE_API_KEY, 'restricted-pod-delete-secret');
     assert.equal(body.env.RUNPOD_KEY, undefined);
     assert.equal(body.env.RUNPOD_API_KEY, undefined, 'RunPod injects the pod-scoped key itself');
     assert.deepEqual(body.gpuTypeIds, ['NVIDIA RTX A5000']);
     assert.equal(body.gpuTypePriority, 'custom', 'RunPod must honor the benchmarked preference order');
     assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA RTX A5000');
     assert.match(body.dockerStartCmd[2], /self-reaper\.py/);
+});
+
+test('pod-local self-reaper stays disabled without a dedicated termination key', async () => {
+    const requests = [];
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'account-secret', RUNPOD_SELF_REAP_SECONDS: '1200' },
+        fetchImpl: async (url, options) => {
+            requests.push({ url, options });
+            return response({ id: 'pod-123', machine: { gpuTypeId: 'NVIDIA RTX A5000' } });
+        },
+    });
+
+    await manager.createPod([]);
+    const body = JSON.parse(requests[0].options.body);
+    assert.equal(body.env.RUNPOD_SELF_REAP_SECONDS, '0');
+    assert.equal(body.env.RUNPOD_TERMINATE_API_KEY, undefined);
+    const status = await manager.status({ probe: false });
+    assert.equal(status.self_reaper_configured, false);
+    assert.equal(status.self_reaper_seconds, 0);
 });
 
 test('server watchdog fully deletes a Pod after its idle deadline', async () => {

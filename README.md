@@ -8,7 +8,7 @@ Despite the historical repository name, this is no longer only an “ordered pro
 
 - Ordered fallback across every image backend supported by SillyTavern. Save complete provider configurations, order them from preferred to last resort, and automatically retry the same prompt when a provider is unavailable or rejects a request.
 - Managed RunPod Pods: explicit warm-up, model prefetch, readiness/status controls, generation proxying, immediate shutdown, existing-pod adoption, and automatic idle termination—all inside the SillyTavern server plugin.
-- Two-layer RunPod cleanup. The server plugin is authoritative and terminates idle Pods after 15 minutes by default; compatible worker images also run a delayed pod-local self-reaper as defense in depth.
+- Server-owned RunPod cleanup terminates idle Pods after 15 minutes by default. Compatible worker images can also run an optional delayed self-reaper when given a dedicated restricted Pod-management key.
 - A model catalog for cold RunPod Pods, including model, LoRA, text-encoder, and VAE downloads. Changing settings or attempting generation never starts a stopped Pod.
 - Tagged reference-image library with automatic LLM selection and `%reference_image%` ComfyUI workflow injection.
 - Editable generated-image prompts: edit the image message, then swipe right to generate from the revised prompt.
@@ -51,13 +51,14 @@ Set the following environment variables on the SillyTavern server/container, the
 | Variable | Default | Purpose |
 |---|---:|---|
 | `RUNPOD_KEY` | — | RunPod account API key. Required to enable managed Pods. It remains server-side and is never sent to the browser or worker. |
+| `RUNPOD_POD_TERMINATE_KEY` | empty | Optional separate Restricted API key with Pod-management access, passed to the worker only for emergency self-termination. Never reuse `RUNPOD_KEY` here. |
 | `HF_TOKEN` | empty | Optional Hugging Face download token passed to the worker. |
 | `CIVITAI_TOKEN` | empty | Optional Civitai download token passed to the worker. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token passed to the worker for gated/private assets. |
 | `RUNPOD_IDLE_SECONDS` | `900` | Server-side idle timeout before full Pod termination. |
 | `RUNPOD_FRONTEND_LEASE_SECONDS` | `300` | Grace period for sleeping/throttled browser tabs. |
 | `RUNPOD_KEEPALIVE_SECONDS` | `60` | Server-to-worker activity heartbeat interval. |
-| `RUNPOD_SELF_REAP_SECONDS` | `1200` | Pod-local idle timeout; set `0` to disable. Deliberately longer than the server timeout. |
+| `RUNPOD_SELF_REAP_SECONDS` | `1200` | Pod-local idle timeout when `RUNPOD_POD_TERMINATE_KEY` is configured; otherwise forced to `0`. Deliberately longer than the server timeout. |
 | `RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS` | `2400` | Maximum initial boot/model-download grace before the self-reaper arms. |
 | `RUNPOD_IMAGE` | `ghcr.io/permissionbrick/comfyui-runpod-worker:latest` | Worker image. Pod-local reaping requires a compatible image. |
 | `RUNPOD_GPU_A5000_TYPE` | `NVIDIA RTX A5000` | RunPod GPU ID behind the default **RTX A5000 — Value** profile. |
@@ -71,7 +72,7 @@ Select **ComfyUI → Managed RunPod Pod** in Image Generation. The Pod starts on
 
 Choose **RTX A5000 — Value** (the default) or **RTX 5090 — Fast** in the RunPod section. Warm-up requests that exact Secure Cloud card; it does not silently substitute another GPU. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
 
-RunPod injects a Pod ID and a Pod-scoped API key into each Pod. The worker self-reaper uses those injected credentials; the full account key is not passed into the Pod. The server-side watchdog remains authoritative because successful full termination from a live worker still depends on RunPod accepting `DELETE /v1/pods/{podId}` with that Pod-scoped credential.
+RunPod injects a Pod ID and a Pod-scoped API key into each Pod, but a live API test confirmed that the injected key receives HTTP 404 when it tries to delete its own Pod. The worker therefore ignores that key. Pod-local reaping is enabled only with `RUNPOD_POD_TERMINATE_KEY`, which should be a separate [Restricted API key](https://docs.runpod.io/get-started/api-keys) granting only the minimum Pod access. Without it, the server-side watchdog remains fully functional and authoritative.
 
 ## Krea 2 Turbo example
 
