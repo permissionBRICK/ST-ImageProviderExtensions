@@ -1,8 +1,14 @@
 #!/usr/bin/env node
-/** Prove whether RunPod's injected Pod-scoped key can fully delete its own Pod. */
+/** Prove whether an injected or explicitly supplied key can delete its own Pod.
+ *
+ * RUNPOD_PROBE_KEY_MODE=injected (default) tests RunPod's automatic Pod key.
+ * RUNPOD_PROBE_KEY_MODE=management passes RUNPOD_KEY to the disposable Pod as
+ * RUNPOD_TERMINATE_API_KEY. The key itself is never printed.
+ */
 const API = 'https://rest.runpod.io/v1';
 const key = process.env.RUNPOD_KEY ?? '';
 const image = process.env.RUNPOD_PROBE_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
+const keyMode = process.env.RUNPOD_PROBE_KEY_MODE ?? 'injected';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function api(method, route, body) {
@@ -31,11 +37,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
     def do_GET(self):
         pod_id = os.environ.get('RUNPOD_POD_ID', '')
-        api_key = os.environ.get('RUNPOD_API_KEY', '')
+        key_mode = os.environ.get('RUNPOD_PROBE_KEY_MODE', 'injected')
+        injected_key = os.environ.get('RUNPOD_API_KEY', '')
+        management_key = os.environ.get('RUNPOD_TERMINATE_API_KEY', '')
+        api_key = management_key if key_mode == 'management' else injected_key
         if self.path == '/status':
-            return self.reply(200, {'pod_id_present': bool(pod_id), 'api_key_present': bool(api_key)})
+            return self.reply(200, {
+                'key_mode': key_mode,
+                'pod_id_present': bool(pod_id),
+                'injected_key_present': bool(injected_key),
+                'management_key_present': bool(management_key),
+                'selected_key_present': bool(api_key),
+            })
         if self.path != '/delete': return self.reply(404, {'error': 'not found'})
-        if not pod_id or not api_key: return self.reply(503, {'error': 'injected credentials missing'})
+        if not pod_id or not api_key: return self.reply(503, {'error': 'selected credentials missing'})
         request = urllib.request.Request(
             'https://rest.runpod.io/v1/pods/' + pod_id,
             headers={'Authorization': 'Bearer ' + api_key}, method='DELETE')
@@ -53,19 +68,23 @@ ThreadingHTTPServer(('0.0.0.0', 8189), Handler).serve_forever()
 
 async function main() {
     if (!key) throw new Error('RUNPOD_KEY is required');
+    if (!['injected', 'management'].includes(keyMode)) throw new Error('RUNPOD_PROBE_KEY_MODE must be injected or management');
     let podId;
     let deleted = false;
     try {
+        const podEnv = { RUNPOD_PROBE_KEY_MODE: keyMode };
+        if (keyMode === 'management') podEnv.RUNPOD_TERMINATE_API_KEY = key;
         const pod = await api('POST', '/pods', {
-            name: `pod-token-delete-proof-${Date.now()}`,
+            name: `pod-${keyMode}-key-delete-proof-${Date.now()}`,
             imageName: image,
             gpuTypeIds: ['NVIDIA A40'], gpuTypePriority: 'custom', gpuCount: 1,
             cloudType: 'SECURE', containerDiskInGb: 50, volumeInGb: 0,
             allowedCudaVersions: ['13.0'], ports: ['8189/http'],
+            env: podEnv,
             dockerStartCmd: ['python3', '-c', python],
         });
         podId = pod.id;
-        console.log(JSON.stringify({ event: 'created', pod_id: podId, gpu: pod.machine?.gpuTypeId, cost_per_hour: pod.costPerHr }));
+        console.log(JSON.stringify({ event: 'created', key_mode: keyMode, pod_id: podId, gpu: pod.machine?.gpuTypeId, cost_per_hour: pod.costPerHr }));
         const base = `https://${podId}-8189.proxy.runpod.net`;
         let status;
         for (let attempt = 0; attempt < 90; attempt++) {
