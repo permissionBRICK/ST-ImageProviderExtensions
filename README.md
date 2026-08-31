@@ -60,13 +60,16 @@ Set the following environment variables on the SillyTavern server/container, the
 | `RUNPOD_SELF_REAP_SECONDS` | `1200` | Pod-local idle timeout; set `0` to disable. Deliberately longer than the server timeout. |
 | `RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS` | `2400` | Maximum initial boot/model-download grace before the self-reaper arms. |
 | `RUNPOD_IMAGE` | `ghcr.io/permissionbrick/comfyui-runpod-worker:latest` | Worker image. Pod-local reaping requires a compatible image. |
-| `RUNPOD_GPU_TYPES` | A40, A5000, RTX 5090, RTX 4090, A6000, L40S, L40, RTX 6000 Ada | Comma-separated GPU preference list, tried in order. The default starts with the best Secure Cloud price/performance measured for the bundled Krea 2 workflow. |
+| `RUNPOD_GPU_A5000_TYPE` | `NVIDIA RTX A5000` | RunPod GPU ID behind the default **RTX A5000 — Value** profile. |
+| `RUNPOD_GPU_5090_TYPE` | `NVIDIA GeForce RTX 5090` | RunPod GPU ID behind the **RTX 5090 — Fast** profile. |
 | `RUNPOD_CUDA_VERSIONS` | `13.0` | Comma-separated allowed CUDA versions. |
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | RunPod cloud type. |
 | `RUNPOD_DATACENTERS` | empty | Optional comma-separated datacenter restriction. |
 | `RUNPOD_START_TIMEOUT` | `1500` | Seconds allowed for Pod boot and model preparation. |
 
 Select **ComfyUI → Managed RunPod Pod** in Image Generation. The Pod starts only when **Warm up** is pressed. Image requests never implicitly provision a stopped Pod, allowing the fallback chain to continue instead. A green status dot means ready, orange means provisioning/downloading, and red means off.
+
+Choose **RTX A5000 — Value** (the default) or **RTX 5090 — Fast** in the RunPod section. Warm-up requests that exact Secure Cloud card; it does not silently substitute another GPU. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
 
 RunPod injects a Pod ID and a Pod-scoped API key into each Pod. The worker self-reaper uses those injected credentials; the full account key is not passed into the Pod. The server-side watchdog remains authoritative because successful full termination from a live worker still depends on RunPod accepting `DELETE /v1/pods/{podId}` with that Pod-scoped credential.
 

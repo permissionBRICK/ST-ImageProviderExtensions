@@ -42,8 +42,9 @@ test('managed Pod creation passes worker tokens and self-reaper settings, but no
     assert.equal(body.env.RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS, '2400');
     assert.equal(body.env.RUNPOD_KEY, undefined);
     assert.equal(body.env.RUNPOD_API_KEY, undefined, 'RunPod injects the pod-scoped key itself');
-    assert.equal(body.gpuTypeIds[0], 'NVIDIA A40');
+    assert.deepEqual(body.gpuTypeIds, ['NVIDIA RTX A5000']);
     assert.equal(body.gpuTypePriority, 'custom', 'RunPod must honor the benchmarked preference order');
+    assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA RTX A5000');
     assert.match(body.dockerStartCmd[2], /self-reaper\.py/);
 });
 
@@ -71,6 +72,23 @@ test('server watchdog fully deletes a Pod after its idle deadline', async () => 
     assert.equal(requests[0].options.method, 'DELETE');
     assert.equal(manager.state.podId, null);
     assert.equal(manager.state.phase, 'red');
+});
+
+test('GPU profiles request an exact card and reject unknown profile IDs', async () => {
+    const requests = [];
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'account-secret' },
+        fetchImpl: async (url, options) => {
+            requests.push({ url, options });
+            return response({ id: 'pod-5090', machine: { gpuTypeId: 'NVIDIA GeForce RTX 5090' } });
+        },
+    });
+    manager.setCatalog({ gpu_profile: 'rtx5090' });
+    await manager.createPod([]);
+    const body = JSON.parse(requests[0].options.body);
+    assert.deepEqual(body.gpuTypeIds, ['NVIDIA GeForce RTX 5090']);
+    assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA GeForce RTX 5090');
+    assert.throws(() => manager.setCatalog({ gpu_profile: 'h100' }), error => error.status === 400);
 });
 
 test('frontend lease prevents idle cleanup until the lease expires', async () => {

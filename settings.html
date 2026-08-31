@@ -82,6 +82,11 @@
             </div>
             <hr>
             <h4 data-i18n="RunPod On-Demand Pod">RunPod On-Demand Pod</h4>
+            <label for="sd_runpod_gpu_profile">GPU profile</label>
+            <select id="sd_runpod_gpu_profile" class="text_pole">
+                <option value="a5000">RTX A5000 — Value (default)</option>
+                <option value="rtx5090">RTX 5090 — Fast</option>
+            </select>
             <div class="flex-container alignItemsCenter marginTopBot5">
                 <span id="sd_runpod_dot" class="sd_runpod_dot"></span>
                 <span id="sd_runpod_status_text" class="flex1">unknown</span>

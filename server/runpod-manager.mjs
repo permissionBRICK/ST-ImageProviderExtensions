@@ -26,14 +26,16 @@ export class RunpodManager {
         this.datacenters = csv(env.RUNPOD_DATACENTERS);
         this.cloudType = env.RUNPOD_CLOUD_TYPE ?? 'SECURE';
         this.image = env.RUNPOD_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
-        this.gpuTypes = csv(env.RUNPOD_GPU_TYPES,
-            'NVIDIA A40,NVIDIA RTX A5000,NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090,NVIDIA RTX A6000,NVIDIA L40S,NVIDIA L40,NVIDIA RTX 6000 Ada Generation');
+        this.gpuProfiles = {
+            a5000: env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000',
+            rtx5090: env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090',
+        };
         this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS, '13.0');
         this.podName = env.RUNPOD_POD_NAME ?? 'comfyui-lazy';
         this.comfyArgs = env.RUNPOD_COMFY_ARGS ?? '--listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention';
         this.selfReapSeconds = Number(env.RUNPOD_SELF_REAP_SECONDS ?? 1200);
         this.selfReapBootGraceSeconds = Number(env.RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS ?? 2400);
-        this.catalog = { models: [], active: [] };
+        this.catalog = { models: [], active: [], gpuProfile: 'a5000' };
         this.state = {
             podId: null,
             model: null,
@@ -115,7 +117,11 @@ export class RunpodManager {
             const pods = await this.api('GET', '/pods');
             const pod = pods.find(item => item.name === this.podName && item.desiredStatus === 'RUNNING');
             if (!pod) return [null, null, null];
-            return [pod.id, pod.env?.MODEL_KEY ?? null, pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? null];
+            return [
+                pod.id,
+                pod.env?.MODEL_KEY ?? null,
+                pod.env?.REQUESTED_GPU_TYPE ?? pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? null,
+            ];
         } catch (error) {
             this.log('pod discovery failed:', error.message);
             return [null, null, null];
@@ -132,6 +138,7 @@ export class RunpodManager {
 
     async createPod(values, datacenters) {
         const files = this.neededFiles(values);
+        const requestedGpu = this.requestedGpu();
         const podEnv = {
             HF_TOKEN: this.env.HF_TOKEN ?? '',
             CIVITAI_TOKEN: this.env.CIVITAI_TOKEN ?? '',
@@ -139,13 +146,14 @@ export class RunpodManager {
             MODEL_KEY: this.valuesKey(values),
             RUNPOD_SELF_REAP_SECONDS: String(this.selfReapSeconds),
             RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS: String(this.selfReapBootGraceSeconds),
+            REQUESTED_GPU_TYPE: requestedGpu,
         };
         if (files.length) podEnv.MODEL_MANIFEST = JSON.stringify(files);
         else podEnv.MODELS = 'all';
         const body = {
             name: this.podName,
             imageName: this.image,
-            gpuTypeIds: this.gpuTypes,
+            gpuTypeIds: [requestedGpu],
             gpuTypePriority: 'custom',
             gpuCount: 1,
             cloudType: this.cloudType,
@@ -254,6 +262,12 @@ export class RunpodManager {
         let created = false;
         checkCancelled();
         if (!podId) [podId, have, gpu] = await this.findPod();
+        const requestedGpu = this.requestedGpu();
+        if (podId && gpu && gpu !== requestedGpu) {
+            this.log(`GPU profile changed (${gpu} -> ${requestedGpu}); replacing ${podId}`);
+            await this.terminate(podId);
+            [podId, have, gpu] = [null, null, null];
+        }
         if (!podId) {
             [podId, gpu] = await this.createPodWithRetries(values, epoch);
             have = key;
@@ -323,11 +337,20 @@ export class RunpodManager {
 
     setCatalog(payload = {}) {
         const active = Array.isArray(payload.active) ? payload.active : [payload.active];
+        const gpuProfile = String(payload.gpu_profile ?? this.catalog.gpuProfile ?? 'a5000');
+        if (!Object.hasOwn(this.gpuProfiles, gpuProfile)) {
+            throw errorWithStatus(`Unknown managed RunPod GPU profile: ${gpuProfile}`, 400);
+        }
         this.catalog = {
             models: Array.isArray(payload.models) ? payload.models : [],
             active: active.filter(value => typeof value === 'string' && value),
+            gpuProfile,
         };
-        this.log(`catalog updated: ${this.catalog.models.length} models; active=${this.catalog.active.join('+')}`);
+        this.log(`catalog updated: ${this.catalog.models.length} models; active=${this.catalog.active.join('+')}; GPU=${gpuProfile}`);
+    }
+
+    requestedGpu() {
+        return this.gpuProfiles[this.catalog.gpuProfile] ?? this.gpuProfiles.a5000;
     }
 
     warmup() {
@@ -415,6 +438,8 @@ export class RunpodManager {
             frontend_lease_seconds_left: Math.ceil(this.frontendLeaseLeft() / 1000),
             keepalive_active: Boolean(this.state.podId && this.state.phase === 'green' && this.frontendLeaseLeft() > 0),
             self_reaper_seconds: this.selfReapSeconds,
+            gpu_profile: this.catalog.gpuProfile,
+            requested_gpu: this.requestedGpu(),
         };
     }
 

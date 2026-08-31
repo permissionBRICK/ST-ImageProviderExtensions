@@ -387,6 +387,9 @@ const defaultSettings = {
 
     // RunPod model catalog ({ name, value, kind: 'model'|'lora', downloads } entries)
     runpod_models: [],
+    // Exact managed-Pod GPU profile. Catalog sync stores it server-side; only
+    // an explicit warm-up may create or replace a Pod.
+    runpod_gpu_profile: 'a5000',
 
     // Selected LoRA for comfy workflows using the %lora% placeholder
     lora: '',
@@ -422,6 +425,7 @@ const PRESET_EXCLUDE_KEYS = [
     'ref_images',
     'runpod_lazy_url',
     'runpod_models',
+    'runpod_gpu_profile',
     // The image-prompt LLM profile is independent of the image backend, so it must
     // never be captured/swapped by image-generation presets or fallback retries.
     'prompt_generation_profile',
@@ -748,6 +752,9 @@ async function loadSettings() {
     if (!Array.isArray(extension_settings.sd.runpod_models)) {
         extension_settings.sd.runpod_models = [];
     }
+    if (!['a5000', 'rtx5090'].includes(extension_settings.sd.runpod_gpu_profile)) {
+        extension_settings.sd.runpod_gpu_profile = 'a5000';
+    }
 
     // The old deployment exposed a separate proxy URL and represented it as a
     // standard ComfyUI server. Convert both live settings and preset snapshots
@@ -869,6 +876,7 @@ async function loadSettings() {
     $('#sd_google_duration').val(extension_settings.sd.google_duration);
     $('#sd_fallback_enabled').prop('checked', extension_settings.sd.settings_fallback_enabled);
     $('#sd_ref_images_enabled').prop('checked', extension_settings.sd.ref_images_enabled);
+    $('#sd_runpod_gpu_profile').val(extension_settings.sd.runpod_gpu_profile);
     renderPresetChain();
     renderRefImages();
     renderRunpodModels();
@@ -1926,7 +1934,11 @@ async function pushRunpodCatalog() {
             method: 'POST',
             headers: getRequestHeaders(),
             signal: AbortSignal.timeout(8000),
-            body: JSON.stringify({ models, active: getRunpodActiveModels() }),
+            body: JSON.stringify({
+                models,
+                active: getRunpodActiveModels(),
+                gpu_profile: extension_settings.sd.runpod_gpu_profile,
+            }),
         });
         if (!result.ok) {
             throw new Error(`catalog returned ${result.status}`);
@@ -1985,6 +1997,12 @@ function onRunpodModelsAddClick() {
     extension_settings.sd.runpod_models.push({ name: '', value: '', downloads: '' });
     saveSettingsDebounced();
     renderRunpodModels();
+}
+
+function onRunpodGpuProfileChange() {
+    extension_settings.sd.runpod_gpu_profile = String($('#sd_runpod_gpu_profile').val() ?? 'a5000');
+    saveSettingsDebounced();
+    void pushRunpodCatalog();
 }
 
 // #endregion
@@ -7667,6 +7685,7 @@ export async function init() {
         }
     });
     $('#sd_runpod_models_add').on('click', onRunpodModelsAddClick);
+    $('#sd_runpod_gpu_profile').on('change', onRunpodGpuProfileChange);
     $('#sd_custom_entry_add').on('click', onAddCustomEntryClick);
     $('#sd_custom_entries_list').on('click', '[data-action]', function () {
         const id = $(this).attr('data-entry-id');

@@ -48,6 +48,7 @@ export const KREA_PRESET = {
 export function configureKrea2(settings, { activate = false } = {}) {
     settings.extension_settings ??= {};
     const sd = settings.extension_settings.sd ??= {};
+    sd.runpod_gpu_profile = 'a5000';
     sd.runpod_models = Array.isArray(sd.runpod_models) ? sd.runpod_models : [];
     for (const entry of KREA_CATALOG) {
         const index = sd.runpod_models.findIndex(item => item?.value === entry.value);
