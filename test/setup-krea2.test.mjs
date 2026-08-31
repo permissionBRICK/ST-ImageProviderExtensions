@@ -8,7 +8,10 @@ test('Krea setup adds an idempotent managed RunPod preset and model catalog', ()
         source: 'openrouter',
         model: 'existing-model',
         runpod_models: [{ name: 'Keep me', value: 'other.safetensors', downloads: '' }],
-        settings_preset_chain: [{ name: 'Keep me too', preset: { source: 'openai' } }],
+        settings_preset_chain: [
+            { name: 'Keep me too', preset: { source: 'openai' } },
+            { name: 'RunPod Krea2 Turbo', preset: { source: 'comfy', model: KREA_PRESET.model, lora: KREA_PRESET.lora, comfy_type: 'standard' } },
+        ],
     } } };
     configureKrea2(settings);
     configureKrea2(settings);
@@ -17,6 +20,7 @@ test('Krea setup adds an idempotent managed RunPod preset and model catalog', ()
     assert.equal(sd.source, 'openrouter', 'setup is non-destructive unless --activate is used');
     assert.equal(sd.runpod_models.length, 1 + KREA_CATALOG.length);
     assert.equal(sd.settings_preset_chain.filter(item => item.name === PRESET_NAME).length, 1);
+    assert.equal(sd.settings_preset_chain.some(item => item.name === 'RunPod Krea2 Turbo'), false, 'legacy Krea preset is upgraded in place');
     assert.deepEqual(sd.settings_preset_chain.find(item => item.name === PRESET_NAME).preset, KREA_PRESET);
     assert.equal(sd.comfy_workflow_prefs[WORKFLOW_NAME].text_encoder, KREA_PRESET.text_encoder);
 });

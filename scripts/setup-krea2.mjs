@@ -57,7 +57,10 @@ export function configureKrea2(settings, { activate = false } = {}) {
 
     sd.settings_preset_chain = Array.isArray(sd.settings_preset_chain) ? sd.settings_preset_chain : [];
     const presetEntry = { name: PRESET_NAME, preset: structuredClone(KREA_PRESET) };
-    const presetIndex = sd.settings_preset_chain.findIndex(item => item?.name === PRESET_NAME);
+    const presetIndex = sd.settings_preset_chain.findIndex(item => item?.name === PRESET_NAME
+        || (item?.preset?.source === 'comfy'
+            && item.preset.model === KREA_PRESET.model
+            && item.preset.lora === KREA_PRESET.lora));
     if (presetIndex >= 0) sd.settings_preset_chain[presetIndex] = presetEntry;
     else sd.settings_preset_chain.push(presetEntry);
     sd.comfy_workflow_prefs ??= {};
