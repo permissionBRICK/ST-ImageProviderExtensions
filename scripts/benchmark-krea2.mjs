@@ -23,7 +23,12 @@ const allCandidates = [
     { label: 'L40S', id: 'NVIDIA L40S', clouds: ['COMMUNITY', 'SECURE'] },
 ];
 const requestedLabels = new Set(String(process.env.RUNPOD_BENCH_GPUS ?? '').split(',').map(value => value.trim()).filter(Boolean));
-const candidates = requestedLabels.size ? allCandidates.filter(candidate => requestedLabels.has(candidate.label)) : allCandidates;
+const secureOnly = process.env.RUNPOD_BENCH_SECURE_ONLY === '1';
+const selectedCandidates = requestedLabels.size ? allCandidates.filter(candidate => requestedLabels.has(candidate.label)) : allCandidates;
+const candidates = selectedCandidates.map(candidate => ({
+    ...candidate,
+    clouds: secureOnly ? ['SECURE'] : candidate.clouds,
+}));
 
 const files = [
     { dest: 'checkpoints/lustifyNSFWCheckpoint_v10Krea2.safetensors', url: 'https://civitai.com/api/download/models/3112728?fileId=2996235' },
@@ -175,7 +180,11 @@ async function benchmark(candidate, livePods) {
         for (let index = 0; index < RUNS; index++) result.runs.push(await generate(candidate, pod, 41000 + index));
         result.averageSeconds = result.runs.reduce((sum, value) => sum + value, 0) / result.runs.length;
         result.medianSeconds = [...result.runs].sort((a, b) => a - b)[Math.floor(result.runs.length / 2)];
-        result.imagesPerDollar = result.pricePerHour ? 3600 / result.averageSeconds / result.pricePerHour : null;
+        const warmRuns = result.runs.slice(1);
+        result.warmAverageSeconds = warmRuns.length
+            ? warmRuns.reduce((sum, value) => sum + value, 0) / warmRuns.length
+            : result.averageSeconds;
+        result.imagesPerDollar = result.pricePerHour ? 3600 / result.warmAverageSeconds / result.pricePerHour : null;
         result.status = 'ok';
     } catch (error) {
         result.error = error.message;
