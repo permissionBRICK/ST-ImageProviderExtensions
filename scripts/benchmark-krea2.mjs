@@ -23,7 +23,7 @@ const allCandidates = [
     { label: 'L40S', id: 'NVIDIA L40S', clouds: ['COMMUNITY', 'SECURE'] },
 ];
 const requestedLabels = new Set(String(process.env.RUNPOD_BENCH_GPUS ?? '').split(',').map(value => value.trim()).filter(Boolean));
-const secureOnly = process.env.RUNPOD_BENCH_SECURE_ONLY === '1';
+const secureOnly = process.env.RUNPOD_BENCH_ALLOW_COMMUNITY !== '1';
 const selectedCandidates = requestedLabels.size ? allCandidates.filter(candidate => requestedLabels.has(candidate.label)) : allCandidates;
 const candidates = selectedCandidates.map(candidate => ({
     ...candidate,

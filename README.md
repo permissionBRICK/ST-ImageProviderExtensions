@@ -60,7 +60,7 @@ Set the following environment variables on the SillyTavern server/container, the
 | `RUNPOD_SELF_REAP_SECONDS` | `1200` | Pod-local idle timeout; set `0` to disable. Deliberately longer than the server timeout. |
 | `RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS` | `2400` | Maximum initial boot/model-download grace before the self-reaper arms. |
 | `RUNPOD_IMAGE` | `ghcr.io/permissionbrick/comfyui-runpod-worker:latest` | Worker image. Pod-local reaping requires a compatible image. |
-| `RUNPOD_GPU_TYPES` | RTX 6000 Ada, L40S, L40, RTX A6000, A40 | Comma-separated GPU preference list. |
+| `RUNPOD_GPU_TYPES` | A40, A5000, RTX 5090, RTX 4090, A6000, L40S, L40, RTX 6000 Ada | Comma-separated GPU preference list, tried in order. The default starts with the best Secure Cloud price/performance measured for the bundled Krea 2 workflow. |
 | `RUNPOD_CUDA_VERSIONS` | `13.0` | Comma-separated allowed CUDA versions. |
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | RunPod cloud type. |
 | `RUNPOD_DATACENTERS` | empty | Optional comma-separated datacenter restriction. |

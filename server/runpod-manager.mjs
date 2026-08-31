@@ -27,7 +27,7 @@ export class RunpodManager {
         this.cloudType = env.RUNPOD_CLOUD_TYPE ?? 'SECURE';
         this.image = env.RUNPOD_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
         this.gpuTypes = csv(env.RUNPOD_GPU_TYPES,
-            'NVIDIA RTX 6000 Ada Generation,NVIDIA L40S,NVIDIA L40,NVIDIA RTX A6000,NVIDIA A40');
+            'NVIDIA A40,NVIDIA RTX A5000,NVIDIA GeForce RTX 5090,NVIDIA GeForce RTX 4090,NVIDIA RTX A6000,NVIDIA L40S,NVIDIA L40,NVIDIA RTX 6000 Ada Generation');
         this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS, '13.0');
         this.podName = env.RUNPOD_POD_NAME ?? 'comfyui-lazy';
         this.comfyArgs = env.RUNPOD_COMFY_ARGS ?? '--listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention';
@@ -146,6 +146,7 @@ export class RunpodManager {
             name: this.podName,
             imageName: this.image,
             gpuTypeIds: this.gpuTypes,
+            gpuTypePriority: 'custom',
             gpuCount: 1,
             cloudType: this.cloudType,
             containerDiskInGb: 80,

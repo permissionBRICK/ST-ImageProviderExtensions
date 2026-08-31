@@ -42,6 +42,8 @@ test('managed Pod creation passes worker tokens and self-reaper settings, but no
     assert.equal(body.env.RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS, '2400');
     assert.equal(body.env.RUNPOD_KEY, undefined);
     assert.equal(body.env.RUNPOD_API_KEY, undefined, 'RunPod injects the pod-scoped key itself');
+    assert.equal(body.gpuTypeIds[0], 'NVIDIA A40');
+    assert.equal(body.gpuTypePriority, 'custom', 'RunPod must honor the benchmarked preference order');
     assert.match(body.dockerStartCmd[2], /self-reaper\.py/);
 });
 
