@@ -50,7 +50,7 @@ Set the following environment variables on the SillyTavern server/container, the
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `RUNPOD_KEY` | — | RunPod management API key. Required to enable managed Pods. It is never sent to the browser. When pod-local reaping is enabled, it is passed to the worker as `RUNPOD_TERMINATE_API_KEY`. |
+| `RUNPOD_KEY` | — | RunPod management API key. Create a key with Read/Write Graph API permissions and paste it here to enable RunPod support. |
 | `HF_TOKEN` | empty | Optional Hugging Face download token passed to the worker. |
 | `CIVITAI_TOKEN` | empty | Optional Civitai download token passed to the worker. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token passed to the worker for gated/private assets. |
