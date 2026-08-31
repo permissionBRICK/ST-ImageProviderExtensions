@@ -72,6 +72,7 @@ export { MODULE_NAME };
 const MODULE_NAME = 'sd';
 const LEGACY_IMAGE_PROMPT_PROFILE_MODULE = 'ST-ImagePromptProfiles';
 const COMFY_METADATA_API = '/api/plugins/image-provider-extensions/comfy';
+const RUNPOD_API = '/api/plugins/image-provider-extensions/runpod';
 // Shared event names used by Token Saver and Summarize Profiles. Keeping these
 // local makes the extension work on an unmodified SillyTavern client.
 const TEMPORARY_CONNECTION_STARTED = 'st-token-saver:temporary-connection-started';
@@ -107,6 +108,7 @@ const sources = {
 };
 const comfyTypes = {
     standard: 'standard',
+    managed_runpod: 'managed_runpod',
     runpod_serverless: 'runpod_serverless',
 };
 
@@ -380,7 +382,7 @@ const defaultSettings = {
     ref_images_enabled: false,
     ref_images: [],
 
-    // RunPod lazy-pod proxy base URL ('' = feature off)
+    // Legacy stand-alone proxy URL, retained only to migrate pre-3.0 settings.
     runpod_lazy_url: '',
 
     // RunPod model catalog ({ name, value, kind: 'model'|'lora', downloads } entries)
@@ -520,10 +522,10 @@ async function isCurrentSourceReachable() {
 
     switch (extension_settings.sd.source) {
         case sources.comfy:
-            if (extension_settings.sd.comfy_type !== comfyTypes.standard) {
+            if (extension_settings.sd.comfy_type === comfyTypes.runpod_serverless) {
                 return true;
             }
-            if (isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+            if (isManagedRunpodConfig(extension_settings.sd)) {
                 return isRunpodReady(SOURCE_PROBE_TIMEOUT_MS);
             }
             return probe(`${COMFY_METADATA_API}/ping`, { url: extension_settings.sd.comfy_url });
@@ -747,6 +749,28 @@ async function loadSettings() {
         extension_settings.sd.runpod_models = [];
     }
 
+    // The old deployment exposed a separate proxy URL and represented it as a
+    // standard ComfyUI server. Convert both live settings and preset snapshots
+    // to the integrated server-plugin backend without losing their selections.
+    const legacyRunpodUrl = String(extension_settings.sd.runpod_lazy_url ?? '').trim().replace(/\/$/, '');
+    const migrateManagedRunpod = (config) => {
+        if (config?.source === sources.comfy
+            && config.comfy_type === comfyTypes.standard
+            && legacyRunpodUrl
+            && String(config.comfy_url ?? '').trim().replace(/\/$/, '') === legacyRunpodUrl) {
+            config.comfy_type = comfyTypes.managed_runpod;
+            return true;
+        }
+        return false;
+    };
+    let migratedManagedRunpod = migrateManagedRunpod(extension_settings.sd);
+    for (const entry of extension_settings.sd.settings_preset_chain ?? []) {
+        migratedManagedRunpod = migrateManagedRunpod(entry?.preset) || migratedManagedRunpod;
+    }
+    if (migratedManagedRunpod) {
+        saveSettingsDebounced();
+    }
+
     if (extension_settings.sd.lora === undefined) {
         extension_settings.sd.lora = '';
     }
@@ -845,7 +869,6 @@ async function loadSettings() {
     $('#sd_google_duration').val(extension_settings.sd.google_duration);
     $('#sd_fallback_enabled').prop('checked', extension_settings.sd.settings_fallback_enabled);
     $('#sd_ref_images_enabled').prop('checked', extension_settings.sd.ref_images_enabled);
-    $('#sd_runpod_lazy_url').val(extension_settings.sd.runpod_lazy_url ?? '');
     renderPresetChain();
     renderRefImages();
     renderRunpodModels();
@@ -914,7 +937,7 @@ async function loadSettingOptions() {
 async function loadTextEncoders() {
     $('#sd_text_encoder').empty();
     let encoders = ['N/A'];
-    if (extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type === comfyTypes.standard) {
+    if (extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type !== comfyTypes.runpod_serverless) {
         encoders = await loadComfyTextEncoders();
     }
     for (const encoder of encoders) {
@@ -960,7 +983,7 @@ async function loadComfyTextEncoders() {
 async function loadLoras() {
     $('#sd_lora').empty();
     let loras = ['N/A'];
-    if (extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type === comfyTypes.standard) {
+    if (extension_settings.sd.source === sources.comfy && extension_settings.sd.comfy_type !== comfyTypes.runpod_serverless) {
         loras = await loadComfyLoras();
     }
     for (const lora of loras) {
@@ -1410,7 +1433,7 @@ function collectCandidateComfyWorkflows() {
     const names = new Set();
     /** @param {object} config A settings-shaped object (live settings or a preset snapshot). */
     const consider = (config) => {
-        if (config && config.source === sources.comfy && config.comfy_type === comfyTypes.standard && config.comfy_workflow) {
+        if (config && config.source === sources.comfy && config.comfy_type !== comfyTypes.runpod_serverless && config.comfy_workflow) {
             names.add(config.comfy_workflow);
         }
     };
@@ -1603,28 +1626,44 @@ async function fetchReferenceImageBase64(refImage) {
 /** Poll cadence for the pod status indicator (faster while it is starting). */
 const RUNPOD_POLL_IDLE_MS = 30000;
 const RUNPOD_POLL_BUSY_MS = 5000;
-/** Frontend heartbeat cadence. The proxy tolerates browser timer pauses for five minutes. */
+/** Frontend heartbeat cadence. The server tolerates browser timer pauses for five minutes. */
 const RUNPOD_HEARTBEAT_MS = 20000;
 
 let runpodStatusTimer = null;
 let runpodHeartbeatTimer = null;
 let runpodLastPhase = 'red';
 
-function getRunpodLazyUrl() {
-    return String(extension_settings.sd.runpod_lazy_url ?? '').trim().replace(/\/$/, '');
+/** Whether a settings snapshot uses the server companion's managed RunPod. */
+function isManagedRunpodConfig(config) {
+    if (!config || config.source !== sources.comfy) {
+        return false;
+    }
+    if (config.comfy_type === comfyTypes.managed_runpod) {
+        return true;
+    }
+    // Compatibility with the former stand-alone proxy configuration. loadSettings()
+    // migrates this form, but preset snapshots can arrive from another browser.
+    const legacy = String(extension_settings.sd.runpod_lazy_url ?? '').trim().replace(/\/$/, '');
+    return config.comfy_type === comfyTypes.standard
+        && !!legacy
+        && String(config.comfy_url ?? '').trim().replace(/\/$/, '') === legacy;
+}
+
+function usesManagedRunpod() {
+    if (isManagedRunpodConfig(extension_settings.sd)) {
+        return true;
+    }
+    return (extension_settings.sd.settings_preset_chain ?? [])
+        .some(entry => isManagedRunpodConfig(entry?.preset));
 }
 
 /**
- * Reads the lazy proxy status without starting or warming a pod.
+ * Reads managed Pod status without starting or warming a Pod.
  * @param {number} timeout Request timeout in milliseconds.
- * @returns {Promise<object>} Parsed /lazy/status response.
+ * @returns {Promise<object>} Parsed server-plugin status response.
  */
 async function getRunpodStatus(timeout = 8000) {
-    const url = getRunpodLazyUrl();
-    if (!url) {
-        throw new Error('RunPod lazy proxy URL is not configured.');
-    }
-    const result = await fetch(`${url}/lazy/status`, { signal: AbortSignal.timeout(timeout) });
+    const result = await fetch(`${RUNPOD_API}/status`, { signal: AbortSignal.timeout(timeout) });
     if (!result.ok) {
         throw new Error(`RunPod status returned ${result.status}.`);
     }
@@ -1632,9 +1671,9 @@ async function getRunpodStatus(timeout = 8000) {
 }
 
 /**
- * Checks whether the lazy proxy already has a ready pod.
+ * Checks whether the manager already has a ready Pod.
  * @param {number} timeout Request timeout in milliseconds.
- * @returns {Promise<boolean>} True only when /lazy/status reports green.
+ * @returns {Promise<boolean>} True only when status reports green.
  */
 async function isRunpodReady(timeout = 8000) {
     try {
@@ -1645,7 +1684,7 @@ async function isRunpodReady(timeout = 8000) {
 }
 
 /**
- * Updates the status dot + text from a /lazy/status response (or an error).
+ * Updates the status dot and text from a manager response (or an error).
  * @param {object|null} status Parsed status JSON, or null when unreachable.
  */
 function renderRunpodStatus(status) {
@@ -1670,7 +1709,9 @@ function renderRunpodStatus(status) {
         }
     }
     if (!status) {
-        text.textContent = 'proxy unreachable';
+        text.textContent = 'server companion unreachable';
+    } else if (status.configured === false) {
+        text.textContent = 'server not configured';
     } else if (phase === 'green') {
         const left = status.idle_seconds_left ? ` (idle stop in ${Math.round(status.idle_seconds_left / 60)}m)` : '';
         text.textContent = `ready on ${status.gpu ?? 'GPU'}${left}`;
@@ -1702,14 +1743,13 @@ function ensureRunpodBarDot() {
     dot.tabIndex = 0;
     dot.addEventListener('click', () => runpodControl(runpodLastPhase === 'red' ? 'warmup' : 'shutdown'));
     anchor.appendChild(dot);
-    dot.style.display = getRunpodLazyUrl() ? '' : 'none';
+    dot.style.display = usesManagedRunpod() ? '' : 'none';
 }
 
 let runpodPollFailures = 0;
 
 async function pollRunpodStatus() {
-    const url = getRunpodLazyUrl();
-    if (!url) {
+    if (!usesManagedRunpod()) {
         return;
     }
     let phase = runpodLastPhase;
@@ -1717,7 +1757,7 @@ async function pollRunpodStatus() {
         runpodPollFailures = 0;
         phase = renderRunpodStatus(await getRunpodStatus());
     } catch {
-        // A single slow/failed poll (e.g. while the proxy is provisioning a pod)
+        // A single slow/failed poll (e.g. while the server is provisioning a Pod)
         // must not flip the dot to red; only sustained unreachability does.
         runpodPollFailures++;
         if (runpodPollFailures >= 3) {
@@ -1729,15 +1769,18 @@ async function pollRunpodStatus() {
 }
 
 async function runpodControl(action) {
-    const url = getRunpodLazyUrl();
-    if (!url) {
+    if (!usesManagedRunpod()) {
         return;
     }
     try {
         if (action === 'warmup' && !(await pushRunpodCatalog())) {
             throw new Error('Could not sync the RunPod model catalog. The pod was not started.');
         }
-        const result = await fetch(`${url}/lazy/${action}`, { method: 'POST', signal: AbortSignal.timeout(10000) });
+        const result = await fetch(`${RUNPOD_API}/${action}`, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            signal: AbortSignal.timeout(10000),
+        });
         if (!result.ok) {
             throw new Error(`RunPod ${action} returned ${result.status}.`);
         }
@@ -1753,14 +1796,17 @@ async function runpodControl(action) {
 }
 
 function runpodHeartbeat() {
-    const url = getRunpodLazyUrl();
-    if (!url) {
+    if (!usesManagedRunpod()) {
         return;
     }
-    // This only renews the proxy's frontend lease and never starts a pod. The
-    // proxy owns the stable upstream keepalive cadence so browser timer
+    // This only renews the server's frontend lease and never starts a Pod. The
+    // server owns the stable upstream keepalive cadence so browser timer
     // throttling cannot directly skew it.
-    fetch(`${url}/lazy/ping`, { method: 'POST', signal: AbortSignal.timeout(5000) }).catch(() => { });
+    fetch(`${RUNPOD_API}/ping`, {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        signal: AbortSignal.timeout(5000),
+    }).catch(() => { });
 }
 
 /** (Re)starts the status polling and frontend-heartbeat loops. */
@@ -1770,9 +1816,9 @@ function setupRunpodLoops() {
     ensureRunpodBarDot();
     const barDot = document.getElementById('sd_runpod_bar_dot');
     if (barDot) {
-        barDot.style.display = getRunpodLazyUrl() ? '' : 'none';
+        barDot.style.display = usesManagedRunpod() ? '' : 'none';
     }
-    if (!getRunpodLazyUrl()) {
+    if (!usesManagedRunpod()) {
         renderRunpodStatus(null);
         return;
     }
@@ -1781,20 +1827,13 @@ function setupRunpodLoops() {
     runpodHeartbeatTimer = setInterval(runpodHeartbeat, RUNPOD_HEARTBEAT_MS);
 }
 
-function onRunpodLazyUrlInput() {
-    extension_settings.sd.runpod_lazy_url = String($(this).val() ?? '').trim();
-    saveSettingsDebounced();
-    setupRunpodLoops();
-}
-
 /**
- * Whether a comfy URL points at the runpod-lazy proxy.
+ * Backward-compatible helper for call sites operating on the live config.
  * @param {string} url ComfyUI URL to test.
- * @returns {boolean} True when it equals the configured proxy URL.
+ * @returns {boolean} True for the managed type or its legacy URL form.
  */
 function isRunpodProxyUrl(url) {
-    const lazy = getRunpodLazyUrl();
-    return !!lazy && String(url ?? '').trim().replace(/\/$/, '') === lazy;
+    return isManagedRunpodConfig({ ...extension_settings.sd, comfy_url: url });
 }
 
 /**
@@ -1828,7 +1867,7 @@ function parseRunpodFiles(text) {
 }
 
 /**
- * The model+lora filenames saved for whichever config uses the proxy: the live
+ * The model+lora filenames saved for whichever config uses managed RunPod: the live
  * settings if they point at it, else the chain entry that does.
  * @returns {string[]} Active catalog values (model and/or lora).
  */
@@ -1836,9 +1875,9 @@ function getRunpodActiveModels() {
     let config = null;
     // Only use live settings when the current source is actually ComfyUI AND
     // its model is in the catalog. If the user is on Grok/OpenRouter but
-    // comfy_url points at the proxy, the fallback chain's ComfyUI presets are
+    // settings use managed RunPod, the fallback chain's ComfyUI presets are
     // what matter, not the live source which may not even be image-gen capable.
-    if (extension_settings.sd.source === 'comfy' && isRunpodProxyUrl(extension_settings.sd.comfy_url)) {
+    if (isManagedRunpodConfig(extension_settings.sd)) {
         const known = new Set(getRunpodCatalog().map(m => m.value));
         if (known.has(extension_settings.sd.model)) {
             config = extension_settings.sd;
@@ -1847,7 +1886,7 @@ function getRunpodActiveModels() {
     if (!config) {
         const chain = Array.isArray(extension_settings.sd.settings_preset_chain) ? extension_settings.sd.settings_preset_chain : [];
         // Find the first ComfyUI preset in the chain, not just any preset with a matching URL
-        config = chain.find(e => e?.preset?.source === 'comfy' && isRunpodProxyUrl(e?.preset?.comfy_url))?.preset ?? null;
+        config = chain.find(e => isManagedRunpodConfig(e?.preset))?.preset ?? null;
     }
     if (!config) {
         return [];
@@ -1857,13 +1896,12 @@ function getRunpodActiveModels() {
 }
 
 /**
- * Pushes the model catalog + active selection to the proxy.
- * Catalog updates only store configuration; only /lazy/warmup may provision.
- * @returns {Promise<boolean>} Whether the proxy accepted the catalog.
+ * Pushes the model catalog + active selection to the server companion.
+ * Catalog updates only store configuration; only Warm up may provision.
+ * @returns {Promise<boolean>} Whether the server accepted the catalog.
  */
 async function pushRunpodCatalog() {
-    const url = getRunpodLazyUrl();
-    if (!url) {
+    if (!usesManagedRunpod()) {
         return false;
     }
     const models = getRunpodCatalog().map(m => ({
@@ -1873,9 +1911,9 @@ async function pushRunpodCatalog() {
         files: parseRunpodFiles(m.downloads),
     }));
     try {
-        const result = await fetch(`${url}/lazy/catalog`, {
+        const result = await fetch(`${RUNPOD_API}/catalog`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             signal: AbortSignal.timeout(8000),
             body: JSON.stringify({ models, active: getRunpodActiveModels() }),
         });
@@ -4872,6 +4910,7 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
                         result = await generateComfyRunPodImage(prefixedPrompt, negativePrompt, attemptSignal);
                         break;
                     case comfyTypes.standard:
+                    case comfyTypes.managed_runpod:
                         result = await generateComfyImage(prefixedPrompt, negativePrompt, attemptSignal);
                         break;
                     default:
@@ -5871,7 +5910,8 @@ async function generateComfyImageCommon(prompt, negativePrompt, signal, basePath
  * @returns {Promise<{format: string, data: string}>} - A promise that resolves when the image generation and processing are complete.
  */
 async function generateComfyImage(prompt, negativePrompt, signal) {
-    if (isRunpodProxyUrl(extension_settings.sd.comfy_url) && !(await isRunpodReady(SOURCE_PROBE_TIMEOUT_MS))) {
+    const managed = isManagedRunpodConfig(extension_settings.sd);
+    if (managed && !(await isRunpodReady(SOURCE_PROBE_TIMEOUT_MS))) {
         throw new Error('RunPod on-demand pod is not ready. Start it with the Warm up control.');
     }
     const placeholders = [
@@ -5887,7 +5927,14 @@ async function generateComfyImage(prompt, negativePrompt, signal) {
         'width',
         'height',
     ];
-    return generateComfyImageCommon(prompt, negativePrompt, signal, '/api/sd/comfy', placeholders, extension_settings.sd.comfy_url);
+    return generateComfyImageCommon(
+        prompt,
+        negativePrompt,
+        signal,
+        managed ? RUNPOD_API : '/api/sd/comfy',
+        placeholders,
+        managed ? null : extension_settings.sd.comfy_url,
+    );
 }
 
 /**
@@ -6711,6 +6758,8 @@ function isValidState() {
                         secret_state[SECRET_KEYS.COMFY_RUNPOD];
                 case comfyTypes.standard:
                     return !!extension_settings.sd.comfy_url;
+                case comfyTypes.managed_runpod:
+                    return true;
                 default:
                     return false;
             }
@@ -7590,7 +7639,6 @@ export async function init() {
     $('#sd_ref_images_enabled').on('change', onRefImagesEnabledChange);
     $('#sd_ref_images_add').on('click', () => $('#sd_ref_images_file').trigger('click'));
     $('#sd_ref_images_file').on('change', onRefImagesFileChange);
-    $('#sd_runpod_lazy_url').on('input', onRunpodLazyUrlInput);
     $('#sd_runpod_warmup').on('click', () => runpodControl('warmup'));
     $('#sd_runpod_shutdown').on('click', () => runpodControl('shutdown'));
     // Copy instead of navigate: RunPod's WAF 403s any cross-site link click

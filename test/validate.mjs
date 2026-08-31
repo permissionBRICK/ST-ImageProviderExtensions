@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url)));
 assert.equal(manifest.generate_interceptor, 'SD_ProcessTriggers');
-for (const file of [manifest.js, manifest.css, 'comfy-defaults.js', 'settings.html', 'button.html', 'dropdown.html', 'README.md', 'LICENSE']) assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), file);
+for (const file of [manifest.js, manifest.css, 'comfy-defaults.js', 'settings.html', 'button.html', 'dropdown.html', 'README.md', 'LICENSE', 'examples/Krea2_Turbo_Managed_RunPod.json', 'scripts/setup-krea2.mjs']) assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), file);
 assert.ok(fs.existsSync(new URL('../server/index.mjs', import.meta.url)), 'server/index.mjs');
 
 const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
@@ -25,6 +25,9 @@ assert.ok(!source.includes('STImageGenerationHooks?.generatePrompt'), 'companion
 assert.ok(source.includes("'st-token-saver:temporary-connection-started'"), 'temporary profile switches must pause Token Saver without a core patch');
 assert.ok(!source.includes('event_types.CONNECTION_PROFILE_TEMPORARY_STARTED'), 'must not require custom SillyTavern event constants');
 assert.ok(source.includes("'/api/plugins/image-provider-extensions/comfy'"), 'ComfyUI metadata must use the bundled server plugin');
+assert.ok(source.includes("'/api/plugins/image-provider-extensions/runpod'"), 'managed RunPod must use the bundled server plugin');
+assert.ok(settings.includes('value="managed_runpod"'), 'managed RunPod must be a first-class ComfyUI server type');
+assert.ok(!settings.includes('id="sd_runpod_lazy_url"'), 'stand-alone proxy URL control must be removed');
 assert.ok(source.includes('`${COMFY_METADATA_API}/text_encoders`'), 'text encoders must use bundled metadata discovery');
 assert.ok(source.includes("'text_encoder',"), 'ComfyUI generation must substitute the text encoder placeholder');
 assert.ok(workflowEditor.includes('data-placeholder="text_encoder"'), 'workflow editor must indicate the text encoder placeholder');

@@ -1,5 +1,5 @@
 {
-    "display_name": "Image Generation: Provider Extensions",
+    "display_name": "Image Generation: Extended",
     "loading_order": 10,
     "requires": [],
     "dependencies": [
@@ -12,7 +12,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "SillyTavern contributors and permissionBRICK",
-    "version": "2.2.2",
+    "version": "3.0.0",
     "homePage": "https://github.com/permissionBRICK/ST-ImageProviderExtensions",
     "minimum_client_version": "1.18.0",
     "hooks": {

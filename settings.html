@@ -82,8 +82,6 @@
             </div>
             <hr>
             <h4 data-i18n="RunPod On-Demand Pod">RunPod On-Demand Pod</h4>
-            <label for="sd_runpod_lazy_url" data-i18n="Lazy proxy URL">Lazy proxy URL</label>
-            <input id="sd_runpod_lazy_url" type="text" class="text_pole" placeholder="http://203.0.113.4:8189" />
             <div class="flex-container alignItemsCenter marginTopBot5">
                 <span id="sd_runpod_dot" class="sd_runpod_dot"></span>
                 <span id="sd_runpod_status_text" class="flex1">unknown</span>
@@ -100,9 +98,9 @@
                     <span data-i18n="Copy ComfyUI URL">Copy ComfyUI URL</span>
                 </div>
             </div>
-            <small data-i18n="sd_runpod_small">The pod starts only when you press Warm up. A SillyTavern tab sends a heartbeat every 20 seconds; the proxy keeps an already-ready pod alive on its own stable timer and tolerates browser sleep for up to 5 minutes. The pod shuts down 15 minutes after keepalives and other activity stop. Image requests fail over instead of starting a stopped pod. Red = off, orange = starting/downloading models, green = ready.</small>
+            <small data-i18n="sd_runpod_small">Select Managed RunPod Pod as the ComfyUI server type. The server companion provisions and proxies the pod directly—no separate proxy container or public proxy port is needed. Pods start only when you press Warm up and terminate after 15 idle minutes. A second pod-local watchdog provides defense in depth. Image requests fail over instead of starting a stopped pod. Red = off, orange = starting/downloading models, green = ready.</small>
             <h5 data-i18n="Model catalog">Model catalog</h5>
-            <small data-i18n="sd_runpod_models_small">When the ComfyUI URL points at the proxy, the Model dropdown lists these entries instead of asking the backend. Press Warm up to apply the selected model and download its files; changing the selection or generating an image never starts or provisions a stopped pod. Filename = what &quot;%model%&quot; resolves to; downloads = one &quot;subpath url&quot; per line, including companion files (text encoder, VAE, LoRA).</small>
+            <small data-i18n="sd_runpod_models_small">For Managed RunPod Pod, the Model dropdown lists these entries instead of asking a running backend. Press Warm up to apply the selected model and download its files; changing the selection or generating an image never starts a stopped pod. Filename = what &quot;%model%&quot; resolves to; downloads = one &quot;subpath url&quot; per line, including companion files (text encoder, VAE, LoRA).</small>
             <div id="sd_runpod_models_list" class="flex-container flexFlowColumn marginTopBot5"></div>
             <div class="flex-container marginTopBot5">
                 <div id="sd_runpod_models_add" class="menu_button menu_button_icon">
@@ -301,6 +299,7 @@
                 <label for="sd_comfy_type">Server Type</label>
                 <select id="sd_comfy_type" class="text_pole">
                     <option value="standard">Standard Server</option>
+                    <option value="managed_runpod">Managed RunPod Pod</option>
                     <option value="runpod_serverless">RunPod Serverless Endpoint</option>
                 </select>
                 <div data-sd-comfy-type="standard">

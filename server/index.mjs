@@ -1,11 +1,13 @@
 import express from 'express';
 import fetch from 'node-fetch';
+import { RunpodManager } from './runpod-manager.mjs';
 
 export const COMFY_METADATA_TIMEOUT_MS = 15000;
 export const COMFY_METADATA_CACHE_TTL_MS = 30000;
 const SUPPORTED_KINDS = new Set(['ping', 'samplers', 'models', 'schedulers', 'vaes', 'loras', 'text_encoders']);
 const apiRouter = express.Router();
 const objectInfoStores = new WeakMap();
+export const runpodManager = new RunpodManager();
 
 function makeComfyUrl(baseUrl, endpoint) {
     const url = new URL(String(baseUrl ?? ''));
@@ -176,6 +178,58 @@ apiRouter.post('/comfy/:kind', async (request, response) => {
     }
 });
 
+apiRouter.get('/runpod/status', async (_request, response) => {
+    try {
+        response.send(await runpodManager.status());
+    } catch (error) {
+        response.status(error.status ?? 502).send({ error: String(error.message ?? error) });
+    }
+});
+
+apiRouter.post('/runpod/ping', (_request, response) => {
+    runpodManager.ping();
+    response.send({ ok: true });
+});
+
+apiRouter.post('/runpod/catalog', async (request, response) => {
+    try {
+        runpodManager.setCatalog(request.body);
+        response.send(await runpodManager.status({ probe: false }));
+    } catch (error) {
+        response.status(error.status ?? 400).send({ error: String(error.message ?? error) });
+    }
+});
+
+apiRouter.post('/runpod/warmup', async (_request, response) => {
+    try {
+        runpodManager.warmup();
+        response.send(await runpodManager.status({ probe: false }));
+    } catch (error) {
+        response.status(error.status ?? 502).send({ error: String(error.message ?? error) });
+    }
+});
+
+apiRouter.post('/runpod/shutdown', async (_request, response) => {
+    try {
+        await runpodManager.shutdown();
+        response.send(await runpodManager.status({ probe: false }));
+    } catch (error) {
+        response.status(error.status ?? 502).send({ error: String(error.message ?? error) });
+    }
+});
+
+apiRouter.post('/runpod/generate', async (request, response) => {
+    const controller = new AbortController();
+    response.on('close', () => {
+        if (!response.writableEnded) controller.abort(new Error('client disconnected'));
+    });
+    try {
+        response.send(await runpodManager.generate(request.body?.prompt, controller.signal));
+    } catch (error) {
+        if (!response.writableEnded) response.status(error.status ?? 502).send(String(error.message ?? error));
+    }
+});
+
 apiRouter.get('/capabilities', (_request, response) => {
     response.send({
         comfyMetadataProxy: true,
@@ -183,15 +237,22 @@ apiRouter.get('/capabilities', (_request, response) => {
         cacheTtlMs: COMFY_METADATA_CACHE_TTL_MS,
         coalescedObjectInfo: true,
         textEncoderDiscovery: true,
+        managedRunpod: true,
+        managedRunpodConfigured: runpodManager.configured,
     });
 });
 
 export async function init(router) {
     router.use(apiRouter);
+    void runpodManager.start().catch(error => console.error('[Image Generation / RunPod] startup failed:', error));
+}
+
+export async function exit() {
+    runpodManager.stop();
 }
 
 export const info = {
     id: 'image-provider-extensions',
-    name: 'Image Provider Extensions',
-    description: 'Bounded ComfyUI metadata and LoRA discovery endpoints for ST-ImageProviderExtensions.',
+    name: 'Image Generation Companion',
+    description: 'Server companion for the complete Image Generation extension: ComfyUI discovery and managed on-demand RunPod lifecycle.',
 };

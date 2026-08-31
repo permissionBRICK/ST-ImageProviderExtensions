@@ -1,0 +1,49 @@
+{
+  "159": { "_meta": { "title": "Int" }, "class_type": "PrimitiveInt", "inputs": { "value": "%width%" } },
+  "162": { "_meta": { "title": "Int" }, "class_type": "PrimitiveInt", "inputs": { "value": "%height%" } },
+  "166": { "_meta": { "title": "Load Checkpoint" }, "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "%model%" } },
+  "173": {
+    "_meta": { "title": "KSampler" },
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": "%scale%",
+      "denoise": "%denoise%",
+      "latent_image": ["7", 0],
+      "model": ["179", 0],
+      "negative": ["6", 0],
+      "positive": ["5", 0],
+      "sampler_name": "%sampler%",
+      "scheduler": "%scheduler%",
+      "seed": ["174", 0],
+      "steps": "%steps%"
+    }
+  },
+  "174": { "_meta": { "title": "Int" }, "class_type": "PrimitiveInt", "inputs": { "value": "%seed%" } },
+  "178": {
+    "_meta": { "title": "Load LoRA" },
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": { "lora_name": "%lora%", "model": ["166", 0], "strength_model": ["181", 0] }
+  },
+  "179": {
+    "_meta": { "title": "Switch (Model)" },
+    "class_type": "ComfySwitchNode",
+    "inputs": { "on_false": ["166", 0], "on_true": ["178", 0], "switch": ["182", 2] }
+  },
+  "181": { "_meta": { "title": "Float" }, "class_type": "PrimitiveFloat", "inputs": { "value": "%lora_strength%" } },
+  "182": {
+    "_meta": { "title": "Math Expression" },
+    "class_type": "ComfyMathExpression",
+    "inputs": { "expression": "a > 0", "values.a": ["181", 0] }
+  },
+  "2": {
+    "_meta": { "title": "Load CLIP" },
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "%text_encoder%", "device": "default", "type": "krea2" }
+  },
+  "3": { "_meta": { "title": "Load VAE" }, "class_type": "VAELoader", "inputs": { "vae_name": "%vae%" } },
+  "5": { "_meta": { "title": "CLIP Text Encode (Prompt)" }, "class_type": "CLIPTextEncode", "inputs": { "clip": ["2", 0], "text": "%prompt%" } },
+  "50": { "_meta": { "title": "VAE Decode" }, "class_type": "VAEDecode", "inputs": { "samples": ["173", 0], "vae": ["3", 0] } },
+  "51": { "_meta": { "title": "Save Image" }, "class_type": "SaveImage", "inputs": { "filename_prefix": "sillytavern", "images": ["50", 0] } },
+  "6": { "_meta": { "title": "CLIP Text Encode (Prompt)" }, "class_type": "CLIPTextEncode", "inputs": { "clip": ["2", 0], "text": "%negative_prompt%" } },
+  "7": { "_meta": { "title": "Empty Latent Image" }, "class_type": "EmptyLatentImage", "inputs": { "batch_size": 1, "height": ["162", 0], "width": ["159", 0] } }
+}
