@@ -19,7 +19,6 @@ export class RunpodManager {
         this.fetch = fetchImpl;
         this.now = now;
         this.key = env.RUNPOD_KEY ?? '';
-        this.podTerminateKey = env.RUNPOD_POD_TERMINATE_KEY ?? '';
         this.idleMs = Number(env.RUNPOD_IDLE_SECONDS ?? 900) * 1000;
         this.keepaliveMs = Math.max(1000, Number(env.RUNPOD_KEEPALIVE_SECONDS ?? 60) * 1000);
         this.frontendLeaseMs = Math.max(1000, Number(env.RUNPOD_FRONTEND_LEASE_SECONDS ?? 300) * 1000);
@@ -34,7 +33,7 @@ export class RunpodManager {
         this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS, '13.0');
         this.podName = env.RUNPOD_POD_NAME ?? 'comfyui-lazy';
         this.comfyArgs = env.RUNPOD_COMFY_ARGS ?? '--listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention';
-        this.selfReapSeconds = this.podTerminateKey ? Number(env.RUNPOD_SELF_REAP_SECONDS ?? 1200) : 0;
+        this.selfReapSeconds = Number(env.RUNPOD_SELF_REAP_SECONDS ?? 1200);
         this.selfReapBootGraceSeconds = Number(env.RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS ?? 2400);
         this.catalog = { models: [], active: [], gpuProfile: 'a5000' };
         this.state = {
@@ -149,7 +148,10 @@ export class RunpodManager {
             RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS: String(this.selfReapBootGraceSeconds),
             REQUESTED_GPU_TYPE: requestedGpu,
         };
-        if (this.podTerminateKey) podEnv.RUNPOD_TERMINATE_API_KEY = this.podTerminateKey;
+        // RunPod's injected pod-scoped key cannot delete its own Pod, and the
+        // public API cannot mint a per-Pod key. Pass the existing management
+        // key only when the optional dead-man switch is enabled.
+        if (this.selfReapSeconds > 0) podEnv.RUNPOD_TERMINATE_API_KEY = this.key;
         if (files.length) podEnv.MODEL_MANIFEST = JSON.stringify(files);
         else podEnv.MODELS = 'all';
         const body = {
@@ -440,7 +442,7 @@ export class RunpodManager {
             frontend_lease_seconds_left: Math.ceil(this.frontendLeaseLeft() / 1000),
             keepalive_active: Boolean(this.state.podId && this.state.phase === 'green' && this.frontendLeaseLeft() > 0),
             self_reaper_seconds: this.selfReapSeconds,
-            self_reaper_configured: Boolean(this.podTerminateKey),
+            self_reaper_configured: this.selfReapSeconds > 0,
             gpu_profile: this.catalog.gpuProfile,
             requested_gpu: this.requestedGpu(),
         };
