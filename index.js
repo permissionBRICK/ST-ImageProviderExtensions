@@ -1632,6 +1632,14 @@ const RUNPOD_HEARTBEAT_MS = 20000;
 let runpodStatusTimer = null;
 let runpodHeartbeatTimer = null;
 let runpodLastPhase = 'red';
+let runpodServerConfigured = false;
+
+function updateRunpodBarDotVisibility() {
+    const barDot = document.getElementById('sd_runpod_bar_dot');
+    if (barDot) {
+        barDot.style.display = usesManagedRunpod() && runpodServerConfigured ? '' : 'none';
+    }
+}
 
 /** Whether a settings snapshot uses the server companion's managed RunPod. */
 function isManagedRunpodConfig(config) {
@@ -1694,6 +1702,10 @@ function renderRunpodStatus(status) {
         return;
     }
     const phase = status?.state ?? 'red';
+    if (status) {
+        runpodServerConfigured = status.configured !== false;
+        updateRunpodBarDotVisibility();
+    }
     runpodLastPhase = phase;
     const phaseClass = `sd_runpod_${['red', 'orange', 'green'].includes(phase) ? phase : 'red'}`;
     for (const el of [dot, document.getElementById('sd_runpod_bar_dot')].filter(Boolean)) {
@@ -1743,7 +1755,7 @@ function ensureRunpodBarDot() {
     dot.tabIndex = 0;
     dot.addEventListener('click', () => runpodControl(runpodLastPhase === 'red' ? 'warmup' : 'shutdown'));
     anchor.appendChild(dot);
-    dot.style.display = usesManagedRunpod() ? '' : 'none';
+    updateRunpodBarDotVisibility();
 }
 
 let runpodPollFailures = 0;
@@ -1814,11 +1826,10 @@ function setupRunpodLoops() {
     clearTimeout(runpodStatusTimer);
     clearInterval(runpodHeartbeatTimer);
     ensureRunpodBarDot();
-    const barDot = document.getElementById('sd_runpod_bar_dot');
-    if (barDot) {
-        barDot.style.display = usesManagedRunpod() ? '' : 'none';
-    }
+    updateRunpodBarDotVisibility();
     if (!usesManagedRunpod()) {
+        runpodServerConfigured = false;
+        updateRunpodBarDotVisibility();
         renderRunpodStatus(null);
         return;
     }

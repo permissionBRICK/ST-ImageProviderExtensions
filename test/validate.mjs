@@ -28,6 +28,7 @@ assert.ok(source.includes("'/api/plugins/image-provider-extensions/comfy'"), 'Co
 assert.ok(source.includes("'/api/plugins/image-provider-extensions/runpod'"), 'managed RunPod must use the bundled server plugin');
 assert.ok(settings.includes('value="managed_runpod"'), 'managed RunPod must be a first-class ComfyUI server type');
 assert.ok(!settings.includes('id="sd_runpod_lazy_url"'), 'stand-alone proxy URL control must be removed');
+assert.ok(source.includes('usesManagedRunpod() && runpodServerConfigured'), 'chat-bar control must stay hidden unless managed RunPod is configured');
 assert.ok(source.includes('`${COMFY_METADATA_API}/text_encoders`'), 'text encoders must use bundled metadata discovery');
 assert.ok(source.includes("'text_encoder',"), 'ComfyUI generation must substitute the text encoder placeholder');
 assert.ok(workflowEditor.includes('data-placeholder="text_encoder"'), 'workflow editor must indicate the text encoder placeholder');
