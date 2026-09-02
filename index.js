@@ -387,9 +387,9 @@ const defaultSettings = {
 
     // RunPod model catalog ({ name, value, kind: 'model'|'lora', downloads } entries)
     runpod_models: [],
-    // Exact managed-Pod GPU profile. Catalog sync stores it server-side; only
-    // an explicit warm-up may create or replace a Pod.
-    runpod_gpu_profile: 'a5000',
+    // Managed-Pod GPU profile. Exact-card and availability-pool profiles are
+    // stored server-side; only an explicit warm-up may create or replace a Pod.
+    runpod_gpu_profile: 'available',
 
     // Selected LoRA for comfy workflows using the %lora% placeholder
     lora: '',
@@ -752,8 +752,8 @@ async function loadSettings() {
     if (!Array.isArray(extension_settings.sd.runpod_models)) {
         extension_settings.sd.runpod_models = [];
     }
-    if (!['a5000', 'rtx5090'].includes(extension_settings.sd.runpod_gpu_profile)) {
-        extension_settings.sd.runpod_gpu_profile = 'a5000';
+    if (!['a5000', 'rtx5090', 'available'].includes(extension_settings.sd.runpod_gpu_profile)) {
+        extension_settings.sd.runpod_gpu_profile = 'available';
     }
 
     // The old deployment exposed a separate proxy URL and represented it as a
@@ -2000,7 +2000,7 @@ function onRunpodModelsAddClick() {
 }
 
 function onRunpodGpuProfileChange() {
-    extension_settings.sd.runpod_gpu_profile = String($('#sd_runpod_gpu_profile').val() ?? 'a5000');
+    extension_settings.sd.runpod_gpu_profile = String($('#sd_runpod_gpu_profile').val() ?? 'available');
     saveSettingsDebounced();
     void pushRunpodCatalog();
 }

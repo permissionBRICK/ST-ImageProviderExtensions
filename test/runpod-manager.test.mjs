@@ -30,6 +30,7 @@ test('managed Pod creation passes the management key only as the self-reaper cre
     manager.setCatalog({
         active: ['model.gguf'],
         models: [{ value: 'model.gguf', files: [{ dest: 'unet/model.gguf', url: 'https://example/model' }] }],
+        gpu_profile: 'a5000',
     });
 
     assert.deepEqual(await manager.createPod(manager.activeValues()), ['pod-123', 'A40']);
@@ -46,6 +47,8 @@ test('managed Pod creation passes the management key only as the self-reaper cre
     assert.deepEqual(body.gpuTypeIds, ['NVIDIA RTX A5000']);
     assert.equal(body.gpuTypePriority, 'custom', 'RunPod must honor the benchmarked preference order');
     assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA RTX A5000');
+    assert.equal(body.env.REQUESTED_GPU_PROFILE, 'a5000');
+    assert.equal(body.env.REQUESTED_GPU_TYPES, 'NVIDIA RTX A5000');
     assert.match(body.dockerStartCmd[2], /self-reaper\.py/);
 });
 
@@ -109,6 +112,77 @@ test('GPU profiles request an exact card and reject unknown profile IDs', async 
     assert.deepEqual(body.gpuTypeIds, ['NVIDIA GeForce RTX 5090']);
     assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA GeForce RTX 5090');
     assert.throws(() => manager.setCatalog({ gpu_profile: 'h100' }), error => error.status === 400);
+});
+
+test('Available GPU profile lets RunPod select from the configured Secure Cloud pool', async () => {
+    const requests = [];
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'account-secret' },
+        fetchImpl: async (url, options) => {
+            requests.push({ url, options });
+            return response({ id: 'pod-available', machine: { gpuTypeId: 'NVIDIA A40' } });
+        },
+    });
+    assert.equal(manager.catalog.gpuProfile, 'available', 'Available must be the server default before catalog sync');
+
+    assert.deepEqual(await manager.createPod([]), ['pod-available', 'NVIDIA A40']);
+    const body = JSON.parse(requests[0].options.body);
+    assert.deepEqual(body.gpuTypeIds, [
+        'NVIDIA RTX A5000',
+        'NVIDIA A40',
+        'NVIDIA RTX A6000',
+        'NVIDIA RTX A4000',
+        'NVIDIA GeForce RTX 4090',
+        'NVIDIA GeForce RTX 5090',
+    ]);
+    assert.equal(body.gpuTypePriority, 'availability');
+    assert.equal(body.env.REQUESTED_GPU_PROFILE, 'available');
+    assert.equal(body.env.REQUESTED_GPU_TYPES, body.gpuTypeIds.join(','));
+    assert.equal(body.env.REQUESTED_GPU_TYPE, undefined);
+
+    const status = await manager.status({ probe: false });
+    assert.deepEqual(status.requested_gpus, body.gpuTypeIds);
+    assert.equal(status.gpu_type_priority, 'availability');
+});
+
+test('Available GPU pool can be overridden without allowing an empty pool', () => {
+    const configured = new RunpodManager({
+        env: { RUNPOD_KEY: 'account-secret', RUNPOD_GPU_AVAILABLE_TYPES: 'NVIDIA A40,NVIDIA L40S' },
+    });
+    configured.setCatalog({ gpu_profile: 'available' });
+    assert.deepEqual(configured.requestedGpus(), ['NVIDIA A40', 'NVIDIA L40S']);
+
+    const empty = new RunpodManager({ env: { RUNPOD_KEY: 'account-secret', RUNPOD_GPU_AVAILABLE_TYPES: '' } });
+    empty.setCatalog({ gpu_profile: 'available' });
+    assert.equal(empty.requestedGpus().length, 6);
+});
+
+test('Available profile adopts a running Pod whose assigned GPU is in the pool', async () => {
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'account-secret' } });
+    manager.setCatalog({ gpu_profile: 'available' });
+    Object.assign(manager.state, { podId: 'pod-a40', gpu: 'NVIDIA A40', phase: 'orange' });
+    manager.upstreamReady = async podId => podId === 'pod-a40';
+    manager.touchPod = async () => true;
+    manager.terminate = async () => assert.fail('an accepted GPU must not be replaced');
+    manager.createPodWithRetries = async () => assert.fail('an accepted GPU must not be recreated');
+
+    assert.equal(await manager.ensurePod([]), 'pod-a40');
+    assert.equal(manager.state.phase, 'green');
+});
+
+test('Pod discovery records the assigned GPU rather than an exact-profile request hint', async () => {
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'account-secret' },
+        fetchImpl: async () => response([{
+            id: 'pod-a40',
+            name: 'comfyui-lazy',
+            desiredStatus: 'RUNNING',
+            env: { MODEL_KEY: 'model.gguf', REQUESTED_GPU_TYPE: 'NVIDIA RTX A5000' },
+            machine: { gpuTypeId: 'NVIDIA A40' },
+        }]),
+    });
+
+    assert.deepEqual(await manager.findPod(), ['pod-a40', 'model.gguf', 'NVIDIA A40']);
 });
 
 test('frontend lease prevents idle cleanup until the lease expires', async () => {

@@ -60,8 +60,9 @@ Set the following environment variables on the SillyTavern server/container, the
 | `RUNPOD_SELF_REAP_SECONDS` | `1200` | Pod-local idle timeout. Deliberately longer than the server timeout. Set `0` to disable it and keep the management key out of the Pod. |
 | `RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS` | `2400` | Maximum initial boot/model-download grace before the self-reaper arms. |
 | `RUNPOD_IMAGE` | `ghcr.io/permissionbrick/comfyui-runpod-worker:latest` | Worker image. Pod-local reaping requires a compatible image. |
-| `RUNPOD_GPU_A5000_TYPE` | `NVIDIA RTX A5000` | RunPod GPU ID behind the default **RTX A5000 — Value** profile. |
+| `RUNPOD_GPU_A5000_TYPE` | `NVIDIA RTX A5000` | RunPod GPU ID behind the exact-card **RTX A5000 — Value** profile. |
 | `RUNPOD_GPU_5090_TYPE` | `NVIDIA GeForce RTX 5090` | RunPod GPU ID behind the **RTX 5090 — Fast** profile. |
+| `RUNPOD_GPU_AVAILABLE_TYPES` | A5000, A40, A6000, A4000, RTX 4090, RTX 5090 | Comma-separated GPU pool behind the default **Available — Broad GPU pool** profile. RunPod selects according to current availability. |
 | `RUNPOD_CUDA_VERSIONS` | `13.0` | Comma-separated allowed CUDA versions. |
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | RunPod cloud type. |
 | `RUNPOD_DATACENTERS` | empty | Optional comma-separated datacenter restriction. |
@@ -69,7 +70,14 @@ Set the following environment variables on the SillyTavern server/container, the
 
 Select **ComfyUI → Managed RunPod Pod** in Image Generation. The Pod starts only when **Warm up** is pressed. Image requests never implicitly provision a stopped Pod, allowing the fallback chain to continue instead. A green status dot means ready, orange means provisioning/downloading, and red means off.
 
-Choose **RTX A5000 — Value** (the default) or **RTX 5090 — Fast** in the RunPod section. Warm-up requests that exact Secure Cloud card; it does not silently substitute another GPU. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
+Choose **Available — Broad GPU pool** (the default), **RTX A5000 — Value**, or **RTX 5090 — Fast** in the RunPod section. The last two profiles request an exact Secure Cloud card. Available lets RunPod select from A5000, A40, A6000, A4000, RTX 4090, and RTX 5090 according to current capacity. A5000, A40, RTX 4090, and RTX 5090 successfully completed the production Krea2 Secure Cloud benchmark; A6000 and A4000 are additional availability options that have not yet been measured with that workflow. L40S remains excluded because no Secure capacity was available during the benchmark, while L40 and RTX 6000 Ada remain excluded because they were not measured. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
+
+| Benchmarked GPU | Measured $/hr | Cold ready | Warm average | Images/$ |
+|---|---:|---:|---:|---:|
+| RTX A5000 | $0.27 | 288s | 15.73s | 847 |
+| A40 | $0.44 | 310s | 11.09s | 738 |
+| RTX 4090 | $0.74 | 925s | 12.36s | 394 |
+| RTX 5090 | $0.99 | 516s | 9.37s | 388 |
 
 RunPod injects a Pod ID and a Pod-scoped API key into each Pod, but a live API test confirmed that the injected key receives HTTP 404 when it tries to delete its own Pod. The worker therefore ignores that credential. RunPod's public REST API exposes no API-key creation resource, and its [API-key documentation](https://docs.runpod.io/get-started/api-keys) only supports creating keys interactively before the target on-demand Pod exists. Because Pod write access is account-wide rather than scoped to one future Pod, a separately created key would not reduce this workload's effective Pod-management permissions. The manager therefore passes `RUNPOD_KEY` to the worker as `RUNPOD_TERMINATE_API_KEY` when self-reaping is enabled. Treat the worker image and every installed ComfyUI custom node as trusted code; set `RUNPOD_SELF_REAP_SECONDS=0` to retain only the authoritative server watchdog and avoid passing the key.
 

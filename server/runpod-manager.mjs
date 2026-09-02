@@ -3,6 +3,14 @@ import fetch from 'node-fetch';
 
 const UA = 'Mozilla/5.0 (compatible; st-image-generation-runpod)';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const DEFAULT_AVAILABLE_GPU_TYPES = [
+    'NVIDIA RTX A5000',
+    'NVIDIA A40',
+    'NVIDIA RTX A6000',
+    'NVIDIA RTX A4000',
+    'NVIDIA GeForce RTX 4090',
+    'NVIDIA GeForce RTX 5090',
+];
 
 function csv(value, fallback = '') {
     return String(value ?? fallback).split(',').map(x => x.trim()).filter(Boolean);
@@ -26,16 +34,27 @@ export class RunpodManager {
         this.datacenters = csv(env.RUNPOD_DATACENTERS);
         this.cloudType = env.RUNPOD_CLOUD_TYPE ?? 'SECURE';
         this.image = env.RUNPOD_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
+        const availableGpuTypes = csv(env.RUNPOD_GPU_AVAILABLE_TYPES, DEFAULT_AVAILABLE_GPU_TYPES.join(','));
         this.gpuProfiles = {
-            a5000: env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000',
-            rtx5090: env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090',
+            a5000: {
+                types: [env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000'],
+                priority: 'custom',
+            },
+            rtx5090: {
+                types: [env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090'],
+                priority: 'custom',
+            },
+            available: {
+                types: availableGpuTypes.length ? availableGpuTypes : [...DEFAULT_AVAILABLE_GPU_TYPES],
+                priority: 'availability',
+            },
         };
         this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS, '13.0');
         this.podName = env.RUNPOD_POD_NAME ?? 'comfyui-lazy';
         this.comfyArgs = env.RUNPOD_COMFY_ARGS ?? '--listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention';
         this.selfReapSeconds = Number(env.RUNPOD_SELF_REAP_SECONDS ?? 1200);
         this.selfReapBootGraceSeconds = Number(env.RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS ?? 2400);
-        this.catalog = { models: [], active: [], gpuProfile: 'a5000' };
+        this.catalog = { models: [], active: [], gpuProfile: 'available' };
         this.state = {
             podId: null,
             model: null,
@@ -120,7 +139,7 @@ export class RunpodManager {
             return [
                 pod.id,
                 pod.env?.MODEL_KEY ?? null,
-                pod.env?.REQUESTED_GPU_TYPE ?? pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? null,
+                pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? pod.env?.REQUESTED_GPU_TYPE ?? null,
             ];
         } catch (error) {
             this.log('pod discovery failed:', error.message);
@@ -138,7 +157,8 @@ export class RunpodManager {
 
     async createPod(values, datacenters) {
         const files = this.neededFiles(values);
-        const requestedGpu = this.requestedGpu();
+        const requestedGpus = this.requestedGpus();
+        const gpuPriority = this.requestedGpuPriority();
         const podEnv = {
             HF_TOKEN: this.env.HF_TOKEN ?? '',
             CIVITAI_TOKEN: this.env.CIVITAI_TOKEN ?? '',
@@ -146,8 +166,10 @@ export class RunpodManager {
             MODEL_KEY: this.valuesKey(values),
             RUNPOD_SELF_REAP_SECONDS: String(this.selfReapSeconds),
             RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS: String(this.selfReapBootGraceSeconds),
-            REQUESTED_GPU_TYPE: requestedGpu,
+            REQUESTED_GPU_PROFILE: this.catalog.gpuProfile,
+            REQUESTED_GPU_TYPES: requestedGpus.join(','),
         };
+        if (requestedGpus.length === 1) podEnv.REQUESTED_GPU_TYPE = requestedGpus[0];
         // RunPod's injected pod-scoped key cannot delete its own Pod, and the
         // public API cannot mint a per-Pod key. Pass the existing management
         // key only when the optional dead-man switch is enabled.
@@ -157,8 +179,8 @@ export class RunpodManager {
         const body = {
             name: this.podName,
             imageName: this.image,
-            gpuTypeIds: [requestedGpu],
-            gpuTypePriority: 'custom',
+            gpuTypeIds: requestedGpus,
+            gpuTypePriority: gpuPriority,
             gpuCount: 1,
             cloudType: this.cloudType,
             containerDiskInGb: 80,
@@ -266,9 +288,9 @@ export class RunpodManager {
         let created = false;
         checkCancelled();
         if (!podId) [podId, have, gpu] = await this.findPod();
-        const requestedGpu = this.requestedGpu();
-        if (podId && gpu && gpu !== requestedGpu) {
-            this.log(`GPU profile changed (${gpu} -> ${requestedGpu}); replacing ${podId}`);
+        const requestedGpus = this.requestedGpus();
+        if (podId && gpu && !requestedGpus.includes(gpu)) {
+            this.log(`GPU profile changed (${gpu} -> ${requestedGpus.join(' | ')}); replacing ${podId}`);
             await this.terminate(podId);
             [podId, have, gpu] = [null, null, null];
         }
@@ -341,7 +363,7 @@ export class RunpodManager {
 
     setCatalog(payload = {}) {
         const active = Array.isArray(payload.active) ? payload.active : [payload.active];
-        const gpuProfile = String(payload.gpu_profile ?? this.catalog.gpuProfile ?? 'a5000');
+        const gpuProfile = String(payload.gpu_profile ?? this.catalog.gpuProfile ?? 'available');
         if (!Object.hasOwn(this.gpuProfiles, gpuProfile)) {
             throw errorWithStatus(`Unknown managed RunPod GPU profile: ${gpuProfile}`, 400);
         }
@@ -353,8 +375,20 @@ export class RunpodManager {
         this.log(`catalog updated: ${this.catalog.models.length} models; active=${this.catalog.active.join('+')}; GPU=${gpuProfile}`);
     }
 
+    selectedGpuProfile() {
+        return this.gpuProfiles[this.catalog.gpuProfile] ?? this.gpuProfiles.available;
+    }
+
+    requestedGpus() {
+        return [...this.selectedGpuProfile().types];
+    }
+
+    requestedGpuPriority() {
+        return this.selectedGpuProfile().priority;
+    }
+
     requestedGpu() {
-        return this.gpuProfiles[this.catalog.gpuProfile] ?? this.gpuProfiles.a5000;
+        return this.requestedGpus()[0];
     }
 
     warmup() {
@@ -445,6 +479,8 @@ export class RunpodManager {
             self_reaper_configured: this.selfReapSeconds > 0,
             gpu_profile: this.catalog.gpuProfile,
             requested_gpu: this.requestedGpu(),
+            requested_gpus: this.requestedGpus(),
+            gpu_type_priority: this.requestedGpuPriority(),
         };
     }
 

@@ -17,7 +17,7 @@ test('Krea setup adds an idempotent managed RunPod preset and model catalog', ()
     configureKrea2(settings);
 
     const sd = settings.extension_settings.sd;
-    assert.equal(sd.runpod_gpu_profile, 'a5000');
+    assert.equal(sd.runpod_gpu_profile, 'available');
     assert.equal(sd.source, 'openrouter', 'setup is non-destructive unless --activate is used');
     assert.equal(sd.runpod_models.length, 1 + KREA_CATALOG.length);
     assert.equal(sd.settings_preset_chain.filter(item => item.name === PRESET_NAME).length, 1);
