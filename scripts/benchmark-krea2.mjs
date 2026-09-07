@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { KREA_LORA_URL } from '../runpod-catalog.js';
 
 const API = 'https://rest.runpod.io/v1';
 const IMAGE = process.env.RUNPOD_BENCH_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:cuda13-candidate';
@@ -34,7 +35,7 @@ const files = [
     { dest: 'checkpoints/lustifyNSFWCheckpoint_v10Krea2.safetensors', url: 'https://civitai.com/api/download/models/3112728?fileId=2996235' },
     { dest: 'text_encoders/qwen3vl_4b_bf16.safetensors', url: 'https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_bf16.safetensors' },
     { dest: 'vae/qwen_image_vae.safetensors', url: 'https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors' },
-    { dest: 'loras/krea2_turbo_4step_rank_64_lora_latest.safetensors', url: 'https://huggingface.co/lvladikov/Krea2-Turbo-Distill-4step-LoRA/resolve/main/krea2_turbo_4step_rank_64_lora_latest_comfyui.safetensors' },
+    { dest: 'loras/krea2_turbo_4step_rank_64_lora_latest.safetensors', url: KREA_LORA_URL },
 ];
 
 function log(label, message) {

@@ -112,6 +112,8 @@ The script configures these exact worker destinations:
 
 The preset uses Euler/Simple, 4 steps, CFG 1, LoRA strength 1, and 1920×1088 output. Configure `RUNPOD_KEY` plus `CIVITAI_TOKEN` and, when required by the repositories, `HF_TOKEN` on the SillyTavern server before warming the Pod. The helper deliberately does not read or write secrets.
 
+The LoRA download is pinned to Hugging Face revision `e383f7a85d21d4c03c03a7347e018f9f9bf4046c`, file `krea2_turbo_4step_rank_64_lora_comfyui.safetensors`. The author removed the former `_latest_comfyui` URL (HTTP 404). Saved catalogs and requests from older browser tabs migrate that exact URL automatically; the local `_latest.safetensors` filename stays unchanged so existing workflows still work.
+
 For manual setup, copy the example JSON into `<user-data>/user/workflows/`, choose **ComfyUI → Managed RunPod Pod**, enter the four destination/URL pairs above in the RunPod model catalog, and select the same values shown in the preset. Press **Warm up** to create the Pod and download the active files.
 
 ## Image-prompt cost routing

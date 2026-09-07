@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fetch from 'node-fetch';
+import { migrateRunpodDownloadUrl } from '../runpod-catalog.js';
 
 const UA = 'Mozilla/5.0 (compatible; st-image-generation-runpod)';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -368,7 +369,11 @@ export class RunpodManager {
             throw errorWithStatus(`Unknown managed RunPod GPU profile: ${gpuProfile}`, 400);
         }
         this.catalog = {
-            models: Array.isArray(payload.models) ? payload.models : [],
+            models: Array.isArray(payload.models) ? payload.models.map(model => ({
+                ...model,
+                // Open browser tabs may still submit the retired URL.
+                files: model.files?.map(file => ({ ...file, url: migrateRunpodDownloadUrl(file.url) })),
+            })) : [],
             active: active.filter(value => typeof value === 'string' && value),
             gpuProfile,
         };
