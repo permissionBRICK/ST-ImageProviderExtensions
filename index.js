@@ -1,5 +1,4 @@
 import { Popper } from '../../../../lib.js';
-import { migrateRunpodDownloads } from './runpod-catalog.js';
 import {
     animation_duration,
     appendMediaToMessage,
@@ -752,13 +751,6 @@ async function loadSettings() {
 
     if (!Array.isArray(extension_settings.sd.runpod_models)) {
         extension_settings.sd.runpod_models = [];
-    }
-    for (const model of extension_settings.sd.runpod_models) {
-        const downloads = migrateRunpodDownloads(model.downloads);
-        if (downloads !== model.downloads) {
-            model.downloads = downloads;
-            saveSettingsDebounced();
-        }
     }
     if (!['a5000', 'rtx5090', 'available'].includes(extension_settings.sd.runpod_gpu_profile)) {
         extension_settings.sd.runpod_gpu_profile = 'available';

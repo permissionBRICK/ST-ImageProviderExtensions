@@ -2,7 +2,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KREA_LORA_URL } from '../runpod-catalog.js';
 
 export const WORKFLOW_NAME = 'Krea2_Turbo_Managed_RunPod.json';
 export const PRESET_NAME = 'Managed RunPod — Krea 2 Turbo';
@@ -22,7 +21,7 @@ export const KREA_CATALOG = [
         name: 'Krea 2 Turbo 4-step LoRA (lvladikov)',
         value: 'krea2_turbo_4step_rank_64_lora_latest.safetensors',
         kind: 'lora',
-        downloads: `loras/krea2_turbo_4step_rank_64_lora_latest.safetensors ${KREA_LORA_URL}`,
+        downloads: 'loras/krea2_turbo_4step_rank_64_lora_latest.safetensors https://huggingface.co/lvladikov/Krea2-Turbo-Distill-4step-LoRA/resolve/main/krea2_turbo_4step_rank_64_lora_latest_comfyui.safetensors',
     },
 ];
 
