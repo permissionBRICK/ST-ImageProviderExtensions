@@ -21,7 +21,7 @@ export const KREA_CATALOG = [
         name: 'Krea 2 Turbo 4-step LoRA (lvladikov)',
         value: 'krea2_turbo_4step_rank_64_lora_latest.safetensors',
         kind: 'lora',
-        downloads: 'loras/krea2_turbo_4step_rank_64_lora_latest.safetensors https://huggingface.co/lvladikov/Krea2-Turbo-Distill-4step-LoRA/resolve/main/krea2_turbo_4step_rank_64_lora_latest_comfyui.safetensors',
+        downloads: 'loras/krea2_turbo_4step_rank_64_lora_latest.safetensors https://huggingface.co/lvladikov/Krea2-Turbo-Distill-4step-LoRA/resolve/e383f7a85d21d4c03c03a7347e018f9f9bf4046c/krea2_turbo_4step_rank_64_lora_comfyui.safetensors',
     },
 ];
 
