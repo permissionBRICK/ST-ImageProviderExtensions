@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fetch from 'node-fetch';
+import { BootGuard } from './runpod-boot-guard.mjs';
 
 const UA = 'Mozilla/5.0 (compatible; st-image-generation-runpod)';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -22,10 +23,23 @@ function errorWithStatus(message, status = 500) {
 
 /** Managed on-demand RunPod lifecycle for the Image Generation server plugin. */
 export class RunpodManager {
-    constructor({ env = process.env, fetchImpl = fetch, now = () => Date.now() } = {}) {
+    constructor({ env = process.env, fetchImpl = fetch, now = () => Date.now(), sleep = delay } = {}) {
         this.env = env;
         this.fetch = fetchImpl;
         this.now = now;
+        this.sleep = sleep;
+        this.pods = new Map();
+        this.downloadTiers = csv(env.RUNPOD_MIN_DOWNLOAD_TIERS, '2500,1000,0').map(value => Number(value) || null);
+        this.maxReplacements = Number(env.RUNPOD_MAX_REPLACEMENTS ?? 3);
+        this.bootOptions = {
+            containerDeadlineMs: Number(env.RUNPOD_CONTAINER_DEADLINE_SECONDS ?? 360) * 1000,
+            pullMin: Number(env.RUNPOD_PULL_MIN_MBS ?? 50),
+            pullAfterMs: Number(env.RUNPOD_PULL_JUDGE_AFTER_SECONDS ?? 45) * 1000,
+            modelMin: Number(env.RUNPOD_MODEL_MIN_MBS ?? 40),
+            modelAfterMs: Number(env.RUNPOD_MODEL_JUDGE_AFTER_SECONDS ?? 45) * 1000,
+            windowMs: Number(env.RUNPOD_DOWNLOAD_WINDOW_SECONDS ?? 30) * 1000,
+            doneFraction: Number(env.RUNPOD_DOWNLOAD_DONE_FRACTION ?? 0.85),
+        };
         this.key = env.RUNPOD_KEY ?? '';
         this.idleMs = Number(env.RUNPOD_IDLE_SECONDS ?? 900) * 1000;
         this.keepaliveMs = Math.max(1000, Number(env.RUNPOD_KEEPALIVE_SECONDS ?? 60) * 1000);
@@ -99,7 +113,11 @@ export class RunpodManager {
             body: body === undefined ? undefined : JSON.stringify(body),
         });
         if (!response.ok) {
-            throw new Error(`RunPod ${method} ${route} returned ${response.status}: ${(await response.text()).slice(0, 300)}`);
+            const detail = (await response.text()).slice(0, 300);
+            throw Object.assign(new Error(`RunPod ${method} ${route} returned ${response.status}: ${detail}`), {
+                status: response.status,
+                noCapacity: method === 'POST' && route === '/pods' && response.status >= 500 && /no (longer any )?instances|instances? (currently )?(un)?available/i.test(detail),
+            });
         }
         const text = await response.text();
         return text ? JSON.parse(text) : {};
@@ -155,7 +173,7 @@ export class RunpodManager {
         return `https://${podId}-8189.proxy.runpod.net`;
     }
 
-    async createPod(values, datacenters) {
+    async createPod(values, datacenters, minDownloadMbps = this.downloadTiers[0]) {
         const files = this.neededFiles(values);
         const requestedGpus = this.requestedGpus();
         const gpuPriority = this.requestedGpuPriority();
@@ -191,8 +209,13 @@ export class RunpodManager {
         };
         if (datacenters?.length) body.dataCenterIds = datacenters;
         if (this.cudaVersions.length) body.allowedCudaVersions = this.cudaVersions;
+        if (minDownloadMbps) body.minDownloadMbps = minDownloadMbps;
+        const created = this.now();
         const pod = await this.api('POST', '/pods', body);
-        this.log(`created pod ${pod.id} models=${podEnv.MODEL_KEY || 'legacy-all'} GPU=${pod.machine?.gpuTypeId ?? '?'} cost=${pod.costPerHr ?? '?'} per hour`);
+        const meta = { created, tier: minDownloadMbps, machineId: pod.machineId ?? pod.machine?.id,
+            dataCenter: pod.machine?.dataCenterId, uplink: pod.machine?.maxDownloadSpeedMbps };
+        this.pods.set(pod.id, meta);
+        this.log(`created pod ${pod.id} models=${podEnv.MODEL_KEY || 'legacy-all'} GPU=${pod.machine?.gpuTypeId ?? '?'} cost=${pod.costPerHr ?? '?'} per hour tier=${meta.tier ?? 'any'} machineId=${meta.machineId ?? '?'} dataCenter=${meta.dataCenter ?? '?'} uplink=${meta.uplink ?? '?'}Mbps`);
         return [pod.id, pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? null];
     }
 
@@ -201,24 +224,68 @@ export class RunpodManager {
         this.state.since = this.now() / 1000;
         const plans = this.datacenters.length ? [this.datacenters, this.datacenters, null] : [null, null, null];
         let lastError;
-        for (const datacenters of plans) {
-            if (epoch !== this.state.controlEpoch) throw new Error('pod warmup cancelled');
-            try {
-                const created = await this.createPod(values, datacenters);
-                if (epoch !== this.state.controlEpoch) {
-                    await this.terminate(created[0]);
-                    throw new Error('pod warmup cancelled');
+        for (const [round, datacenters] of plans.entries()) {
+            let exhausted = false;
+            for (const tier of this.downloadTiers) {
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    if (epoch !== this.state.controlEpoch) throw new Error('pod warmup cancelled');
+                    try {
+                        const created = await this.createPod(values, datacenters, tier);
+                        if (epoch !== this.state.controlEpoch) {
+                            await this.terminate(created[0]);
+                            throw new Error('pod warmup cancelled');
+                        }
+                        return created;
+                    } catch (error) {
+                        if (error.message === 'pod warmup cancelled') throw error;
+                        lastError = error;
+                        this.log(`pod creation tier=${tier ?? 'any'} attempt=${attempt + 1} failed:`, error.message);
+                        if (error.noCapacity) break;
+                        if (error.status && error.status < 500 && error.status !== 429) {
+                            exhausted = true;
+                            break;
+                        }
+                        if (attempt === 2) { exhausted = true; break; }
+                        await this.sleep(5000 * (attempt + 1));
+                    }
                 }
-                return created;
-            } catch (error) {
-                if (error.message === 'pod warmup cancelled') throw error;
-                lastError = error;
-                this.log('pod creation attempt failed:', error.message);
-                await delay(5000);
+                if (exhausted) break; // only no-capacity can drop a tier
             }
+            if (round < plans.length - 1) await this.sleep(5000);
         }
         this.state.phase = 'red';
         throw new Error(`could not create pod: ${lastError?.message ?? 'unknown error'}`);
+    }
+
+    async podLogs(podId) {
+        const response = await this.fetch(`https://hapi.runpod.net/v1/pod/${podId}/logs`, {
+            headers: { Authorization: `Bearer ${this.key}`, 'User-Agent': UA },
+            signal: AbortSignal.timeout(10000),
+        });
+        if (!response.ok) throw new Error(`pod logs returned ${response.status}`);
+        return response.json();
+    }
+
+    bootGuard(podId, files) {
+        const meta = this.pods.get(podId);
+        return meta ? new BootGuard(meta, files, this.bootOptions) : null;
+    }
+
+    async replaceSlowPod(podId, values, epoch) {
+        const [replacement, gpu] = await this.createPodWithRetries(values, epoch);
+        let adopted = false;
+        try {
+            if (epoch !== this.state.controlEpoch) throw new Error('pod warmup cancelled');
+            if (this.state.podId !== podId) throw new Error('pod replaced while waiting');
+            await this.terminate(podId);
+            if (epoch !== this.state.controlEpoch) throw new Error('pod warmup cancelled');
+            if (this.state.podId !== podId) throw new Error('pod replaced while waiting');
+            Object.assign(this.state, { podId: replacement, gpu, model: this.valuesKey(values), last: this.now(), prefetchPod: null });
+            adopted = true;
+            return [replacement, gpu];
+        } finally {
+            if (!adopted) await this.terminate(replacement);
+        }
     }
 
     async managerRequest(podId, method, route, object, timeoutMs = 15000) {
@@ -260,6 +327,7 @@ export class RunpodManager {
         if (!podId) return;
         try {
             await this.api('DELETE', `/pods/${podId}`);
+            this.pods.delete(podId);
             this.log(`terminated pod ${podId}`);
         } catch (error) {
             this.log(`could not terminate pod ${podId}:`, error.message);
@@ -299,10 +367,15 @@ export class RunpodManager {
             have = key;
             created = true;
         }
-        checkCancelled();
+        try { checkCancelled(); } catch (error) {
+            if (created) await this.terminate(podId);
+            throw error;
+        }
         Object.assign(this.state, { podId, model: have, gpu, last: this.now(), phase: this.state.phase === 'green' ? 'green' : 'orange' });
         let ensured = created || files.length === 0;
         let noManagerStrikes = 0;
+        let guard = created ? this.bootGuard(podId, files) : null;
+        let swaps = 0;
         this.state.ensuring++;
         try {
             const deadline = this.now() + this.startTimeoutMs;
@@ -319,6 +392,54 @@ export class RunpodManager {
                     } catch { /* manager is still booting */ }
                 }
                 const ready = await this.upstreamReady(podId);
+                if (guard) {
+                    let managerUp = false;
+                    try {
+                        const status = await this.managerRequest(podId, 'GET', '/status', undefined, 5000);
+                        managerUp = true;
+                        const errors = Object.fromEntries(Object.entries(status.errors ?? {}).filter(([dest]) => destinations.includes(dest)));
+                        if (Object.keys(errors).length) throw new Error(`model download failed: ${JSON.stringify(errors)}`);
+                    } catch (error) {
+                        if (error.message.startsWith('model download failed:')) throw error;
+                    }
+                    if (this.now() >= guard.nextLogsAt) {
+                        guard.nextLogsAt = this.now() + 10000;
+                        try { guard.logs = await this.podLogs(podId); } catch { /* telemetry is optional */ }
+                        if (guard.meta.uplink == null || guard.meta.machineId == null) {
+                            try {
+                                const pod = await this.api('GET', `/pods/${podId}`);
+                                guard.meta.machineId ??= pod.machineId ?? pod.machine?.id;
+                                guard.meta.dataCenter ??= pod.machine?.dataCenterId;
+                                guard.meta.uplink ??= pod.machine?.maxDownloadSpeedMbps;
+                            } catch { /* host metadata may not be assigned yet */ }
+                        }
+                    }
+                    const why = guard.observe(guard.logs, this.now(), managerUp || ready);
+                    checkCancelled();
+                    if (this.state.podId !== podId) throw new Error('pod replaced while waiting');
+                    if (this.now() >= guard.nextReportAt) {
+                        guard.nextReportAt = this.now() + 30000;
+                        this.log(`boot ${podId}: ${guard.describe()}`);
+                    }
+                    if (why && !ready) {
+                        this.log(`slow pod ${podId}: ${why}; ${guard.describe()}; swaps=${swaps}/${this.maxReplacements}`);
+                        if (swaps < this.maxReplacements) {
+                            try {
+                                [podId, gpu] = await this.replaceSlowPod(podId, values, epoch);
+                                swaps++;
+                                guard = this.bootGuard(podId, files);
+                                created = ensured = true;
+                                noManagerStrikes = 0;
+                                continue;
+                            } catch (error) {
+                                checkCancelled();
+                                if (this.state.podId !== podId) throw error;
+                                this.log(`replacement failed; keeping ${podId}:`, error.message);
+                            }
+                        } else this.log(`replacement cap reached; accepting ${podId}`);
+                        guard.quiet = true;
+                    }
+                }
                 let modelsOk = true;
                 if (!created && files.length && ensured) {
                     try {
@@ -338,6 +459,7 @@ export class RunpodManager {
                     [podId, gpu] = await this.createPodWithRetries(values, epoch);
                     Object.assign(this.state, { podId, model: key, gpu, last: this.now() });
                     created = ensured = true;
+                    guard = this.bootGuard(podId, files);
                     continue;
                 }
                 if (ready && modelsOk) {
@@ -345,15 +467,19 @@ export class RunpodManager {
                     this.state.phase = 'green';
                     this.state.since = this.now() / 1000;
                     await this.touchPod(podId);
+                    checkCancelled();
+                    if (this.state.podId !== podId) throw new Error('pod replaced while waiting');
                     if (this.state.prefetchPod !== podId) {
                         this.state.prefetchPod = podId;
                         void this.prefetchRest(podId);
                     }
-                    this.log(`pod ready: ${podId}`);
+                    this.state.boot = guard ? { ...guard.meta, containerSeconds: guard.containerSeconds, pullMBps: guard.pullRate,
+                        modelMBps: guard.modelRate, readySeconds: (this.now() - guard.meta.created) / 1000, swaps } : null;
+                    this.log(`pod ready: ${podId}${guard ? ` after ${this.state.boot.readySeconds.toFixed(1)}s; ${guard.describe()}; swaps=${swaps}` : ''}`);
                     return podId;
                 }
                 this.state.phase = 'orange';
-                await delay(5000);
+                await this.sleep(5000);
             }
             throw new Error('pod not ready within RUNPOD_START_TIMEOUT');
         } finally {

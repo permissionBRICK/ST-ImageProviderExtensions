@@ -67,6 +67,15 @@ Set the following environment variables on the SillyTavern server/container, the
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | RunPod cloud type. |
 | `RUNPOD_DATACENTERS` | empty | Optional comma-separated datacenter restriction. |
 | `RUNPOD_START_TIMEOUT` | `1500` | Seconds allowed for Pod boot and model preparation. |
+| `RUNPOD_MIN_DOWNLOAD_TIERS` | `2500,1000,0` | Minimum host download Mbps ladder. `0` omits the filter. Only a no-capacity response drops a tier; transient errors retry the same tier. |
+| `RUNPOD_CONTAINER_DEADLINE_SECONDS` | `360` | Replace a new Pod if there is still no container-start evidence after this many seconds. |
+| `RUNPOD_PULL_MIN_MBS` | `50` | Minimum image-pull throughput in decimal MB/s. |
+| `RUNPOD_PULL_JUDGE_AFTER_SECONDS` | `45` | Minimum image-pull observation span before judging speed. |
+| `RUNPOD_MODEL_MIN_MBS` | `40` | Minimum model-download throughput in decimal MB/s. |
+| `RUNPOD_MODEL_JUDGE_AFTER_SECONDS` | `45` | Minimum model-download observation span before judging speed. |
+| `RUNPOD_DOWNLOAD_WINDOW_SECONDS` | `30` | Sliding throughput window for both downloads. Estimates interpolate between received-byte samples at the window boundary. |
+| `RUNPOD_DOWNLOAD_DONE_FRACTION` | `0.85` | Stop judging a download once this fraction is received. |
+| `RUNPOD_MAX_REPLACEMENTS` | `3` | Maximum slow-host replacements per warm-up. `0` keeps the first Pod. |
 
 Select **ComfyUI → Managed RunPod Pod** in Image Generation. The Pod starts only when **Warm up** is pressed. Image requests never implicitly provision a stopped Pod, allowing the fallback chain to continue instead. A green status dot means ready, orange means provisioning/downloading, and red means off.
 
@@ -78,6 +87,10 @@ Choose **Available — Broad GPU pool** (the default), **RTX A5000 — Value**, 
 | A40 | $0.44 | 310s | 11.09s | 738 |
 | RTX 4090 | $0.74 | 925s | 12.36s | 394 |
 | RTX 5090 | $0.99 | 516s | 9.37s | 388 |
+
+The boot watchdog polls RunPod's authenticated boot logs every 10 seconds. Docker layer counters measure image pulls; `boot-models` chunk counters measure model bytes actually received, including segmented downloads. The worker's static `/status` percentages and preallocated file sizes are not throughput signals. Model logs arrive roughly once per GB, so detection is delayed at low speeds and a fully stalled stream provides no rate evidence; periodic received-byte counters with timestamps in `/status` would remove that limit. Manifest `size` values provide model totals; the downloader's logged totals are the fallback. Missing, stale, or insufficient log samples disable rate decisions. Cached images need no pull samples. Container-start evidence ends the container deadline, and completed downloads end rate checks, so ComfyUI startup, model loading, and compilation are never judged. The watchdog applies to Pods created by this warm-up, leaving previously adopted Pods alone.
+
+A slow-host swap creates a Pod with the same name, GPU profile, model manifest, CUDA settings, and bandwidth ladder before deleting the old Pod. This keeps the old machine occupied during allocation. The manager logs tier, host uplink, machine ID, datacenter, container time, measured throughput, and swap count. After the cap, or if replacement creation fails, it keeps the current Pod within the original overall start timeout.
 
 RunPod injects a Pod ID and a Pod-scoped API key into each Pod, but a live API test confirmed that the injected key receives HTTP 404 when it tries to delete its own Pod. The worker therefore ignores that credential. RunPod's public REST API exposes no API-key creation resource, and its [API-key documentation](https://docs.runpod.io/get-started/api-keys) only supports creating keys interactively before the target on-demand Pod exists. Because Pod write access is account-wide rather than scoped to one future Pod, a separately created key would not reduce this workload's effective Pod-management permissions. The manager therefore passes `RUNPOD_KEY` to the worker as `RUNPOD_TERMINATE_API_KEY` when self-reaping is enabled. Treat the worker image and every installed ComfyUI custom node as trusted code; set `RUNPOD_SELF_REAP_SECONDS=0` to retain only the authoritative server watchdog and avoid passing the key.
 
