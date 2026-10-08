@@ -132,7 +132,6 @@ test('Available GPU profile lets RunPod select from the configured Secure Cloud 
     assert.deepEqual(await manager.createPod([]), ['pod-available', 'NVIDIA A40']);
     const body = JSON.parse(requests[0].options.body);
     assert.deepEqual(body.gpuTypeIds, [
-        'NVIDIA RTX A5000',
         'NVIDIA A40',
         'NVIDIA RTX A6000',
         'NVIDIA RTX A4000',
@@ -158,7 +157,7 @@ test('Available GPU pool can be overridden without allowing an empty pool', () =
 
     const empty = new RunpodManager({ env: { RUNPOD_KEY: 'account-secret', RUNPOD_GPU_AVAILABLE_TYPES: '' } });
     empty.setCatalog({ gpu_profile: 'available' });
-    assert.equal(empty.requestedGpus().length, 6);
+    assert.equal(empty.requestedGpus().length, 5);
 });
 
 test('Available profile adopts a running Pod whose assigned GPU is in the pool', async () => {

@@ -5,8 +5,8 @@ import { BootGuard } from './runpod-boot-guard.mjs';
 
 const UA = 'Mozilla/5.0 (compatible; st-image-generation-runpod)';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+// The A5000 is the slowest benchmarked card, so only its exact profile requests it.
 const DEFAULT_AVAILABLE_GPU_TYPES = [
-    'NVIDIA RTX A5000',
     'NVIDIA A40',
     'NVIDIA RTX A6000',
     'NVIDIA RTX A4000',
