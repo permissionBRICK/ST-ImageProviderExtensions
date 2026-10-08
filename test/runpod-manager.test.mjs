@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { RunpodManager } from '../server/runpod-manager.mjs';
 import { BootGuard } from '../server/runpod-boot-guard.mjs';
@@ -538,4 +541,37 @@ test('successful termination discards creation metadata', async () => {
     manager.pods.set('pod-1', { created: 0 });
     await manager.terminate('pod-1');
     assert.equal(manager.pods.has('pod-1'), false);
+});
+
+test('synced catalog survives a server restart', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runpod-catalog-'));
+    try {
+        const catalogFile = path.join(dir, 'nested', 'runpod-catalog.json');
+        const first = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, catalogFile });
+        first.log = () => {};
+        first.setCatalog({
+            active: ['model'],
+            models: [{ value: 'model', files: [{ dest: 'checkpoints/model.safetensors', url: 'https://example.com/model' }] }],
+            gpu_profile: 'a5000',
+        });
+
+        const restarted = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, catalogFile });
+        restarted.log = () => {};
+        restarted.loadCatalog();
+        assert.deepEqual(restarted.activeValues(), ['model']);
+        assert.deepEqual(restarted.neededFiles(restarted.activeValues()), [{ dest: 'checkpoints/model.safetensors', url: 'https://example.com/model' }]);
+        assert.equal(restarted.catalog.gpuProfile, 'a5000');
+    } finally {
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('warmup without synced catalog files refuses instead of booting the legacy model set', () => {
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, fetchImpl: async () => assert.fail('no RunPod call without a catalog') });
+    manager.log = () => {};
+    assert.throws(() => manager.warmup(), error => error.status === 409);
+    manager.setCatalog({ active: ['model'], models: [{ value: 'model', files: [] }] });
+    assert.throws(() => manager.warmup(), error => error.status === 409);
+    assert.equal(manager.state.ensurePromise, null);
+    assert.equal(manager.state.phase, 'red');
 });

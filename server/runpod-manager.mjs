@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import fetch from 'node-fetch';
 import { BootGuard } from './runpod-boot-guard.mjs';
@@ -23,8 +24,9 @@ function errorWithStatus(message, status = 500) {
 
 /** Managed on-demand RunPod lifecycle for the Image Generation server plugin. */
 export class RunpodManager {
-    constructor({ env = process.env, fetchImpl = fetch, now = () => Date.now(), sleep = delay } = {}) {
+    constructor({ env = process.env, fetchImpl = fetch, now = () => Date.now(), sleep = delay, catalogFile = null } = {}) {
         this.env = env;
+        this.catalogFile = catalogFile;
         this.fetch = fetchImpl;
         this.now = now;
         this.sleep = sleep;
@@ -487,7 +489,7 @@ export class RunpodManager {
         }
     }
 
-    setCatalog(payload = {}) {
+    setCatalog(payload = {}, { persist = true } = {}) {
         const active = Array.isArray(payload.active) ? payload.active : [payload.active];
         const gpuProfile = String(payload.gpu_profile ?? this.catalog.gpuProfile ?? 'available');
         if (!Object.hasOwn(this.gpuProfiles, gpuProfile)) {
@@ -498,7 +500,28 @@ export class RunpodManager {
             active: active.filter(value => typeof value === 'string' && value),
             gpuProfile,
         };
-        this.log(`catalog updated: ${this.catalog.models.length} models; active=${this.catalog.active.join('+')}; GPU=${gpuProfile}`);
+        this.log(`catalog ${persist ? 'updated' : 'restored'}: ${this.catalog.models.length} models; active=${this.catalog.active.join('+')}; GPU=${gpuProfile}`);
+        if (persist && this.catalogFile) {
+            // Clients without a browser frontend (ST-Lite) warm up through the
+            // API alone, so the catalog must survive a SillyTavern restart.
+            try {
+                fs.mkdirSync(path.dirname(this.catalogFile), { recursive: true });
+                const temp = `${this.catalogFile}.tmp`;
+                fs.writeFileSync(temp, JSON.stringify({ models: this.catalog.models, active: this.catalog.active, gpu_profile: gpuProfile }), { mode: 0o600 });
+                fs.renameSync(temp, this.catalogFile);
+            } catch (error) {
+                this.log('could not save catalog:', error.message);
+            }
+        }
+    }
+
+    loadCatalog() {
+        if (!this.catalogFile) return;
+        try {
+            this.setCatalog(JSON.parse(fs.readFileSync(this.catalogFile, 'utf8')), { persist: false });
+        } catch (error) {
+            if (error.code !== 'ENOENT') this.log('could not restore catalog:', error.message);
+        }
     }
 
     selectedGpuProfile() {
@@ -519,6 +542,11 @@ export class RunpodManager {
 
     warmup() {
         this.requireConfigured();
+        // Without manifest files the worker falls back to its legacy built-in
+        // model set, which is not what the selected preset needs.
+        if (!this.neededFiles(this.activeValues()).length) {
+            throw errorWithStatus('No RunPod model catalog is synced for the selected preset. Open SillyTavern and press Warm up in the Image Generation settings.', 409);
+        }
         if (!this.state.ensurePromise) {
             const epoch = this.state.controlEpoch;
             this.state.phase = this.state.phase === 'green' ? 'green' : 'orange';

@@ -1841,6 +1841,9 @@ function setupRunpodLoops() {
         renderRunpodStatus(null);
         return;
     }
+    // Re-sync on load: settings may have changed outside this browser (setup
+    // script, another device) and API-only clients warm up from the server copy.
+    void pushRunpodCatalog();
     pollRunpodStatus();
     runpodHeartbeat();
     runpodHeartbeatTimer = setInterval(runpodHeartbeat, RUNPOD_HEARTBEAT_MS);

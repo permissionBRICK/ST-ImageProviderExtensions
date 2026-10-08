@@ -79,6 +79,8 @@ Set the following environment variables on the SillyTavern server/container, the
 
 Select **ComfyUI → Managed RunPod Pod** in Image Generation. The Pod starts only when **Warm up** is pressed. Image requests never implicitly provision a stopped Pod, allowing the fallback chain to continue instead. A green status dot means ready, orange means provisioning/downloading, and red means off.
 
+The browser sends the RunPod model catalog and active selection to the server when the extension loads, on each change, and before each warm-up. The server saves the latest copy to `<data root>/_image-provider-extensions/runpod-catalog.json`, so API-only clients can warm up after a SillyTavern restart without a browser tab. A warm-up whose selection resolves to no download files is refused with HTTP 409. It does not boot the worker's legacy built-in model set.
+
 Choose **Available — Broad GPU pool** (the default), **RTX A5000 — Value**, or **RTX 5090 — Fast** in the RunPod section. The last two profiles request an exact Secure Cloud card. Available lets RunPod select from A5000, A40, A6000, A4000, RTX 4090, and RTX 5090 according to current capacity. A5000, A40, RTX 4090, and RTX 5090 successfully completed the production Krea2 Secure Cloud benchmark; A6000 and A4000 are additional availability options that have not yet been measured with that workflow. L40S remains excluded because no Secure capacity was available during the benchmark, while L40 and RTX 6000 Ada remain excluded because they were not measured. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
 
 | Benchmarked GPU | Measured $/hr | Cold ready | Warm average | Images/$ |

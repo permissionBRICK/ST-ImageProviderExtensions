@@ -1,3 +1,4 @@
+import path from 'node:path';
 import express from 'express';
 import fetch from 'node-fetch';
 import { RunpodManager } from './runpod-manager.mjs';
@@ -244,6 +245,10 @@ apiRouter.get('/capabilities', (_request, response) => {
 
 export async function init(router) {
     router.use(apiRouter);
+    if (globalThis.DATA_ROOT) {
+        runpodManager.catalogFile = path.join(globalThis.DATA_ROOT, '_image-provider-extensions', 'runpod-catalog.json');
+        runpodManager.loadCatalog();
+    }
     void runpodManager.start().catch(error => console.error('[Image Generation / RunPod] startup failed:', error));
 }
 
