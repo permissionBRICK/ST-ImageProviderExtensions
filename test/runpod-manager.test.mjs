@@ -573,3 +573,35 @@ test('warmup without synced catalog files refuses instead of booting the legacy 
     assert.equal(manager.state.ensurePromise, null);
     assert.equal(manager.state.phase, 'red');
 });
+
+test('background prefetch logs a failed request and retries it once', async () => {
+    const logs = [];
+    let ensures = 0;
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async () => {}, fetchImpl: async url => {
+        assert.match(url, /-8189\.proxy\.runpod\.net\/ensure$/);
+        ensures++;
+        return ensures === 1 ? response({ error: 'busy' }, 502) : response({ queued: ['checkpoints/b'] });
+    } });
+    manager.log = (...args) => logs.push(args.join(' '));
+    manager.setCatalog({ models: [{ value: 'b', files: [{ dest: 'checkpoints/b', url: 'https://example.com/b' }] }] });
+    manager.state.podId = 'pod-1';
+
+    await manager.prefetchRest('pod-1');
+    assert.equal(ensures, 2);
+    assert.ok(logs.some(line => /background prefetch attempt 1 failed: model manager returned 502/.test(line)));
+    assert.ok(logs.some(line => line === 'background prefetch queued: checkpoints/b'));
+});
+
+test('background prefetch does not retry for a Pod that is no longer tracked', async () => {
+    let ensures = 0;
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async () => assert.fail('no retry delay'), fetchImpl: async () => {
+        ensures++;
+        return response({ error: 'gone' }, 404);
+    } });
+    manager.log = () => {};
+    manager.setCatalog({ models: [{ value: 'b', files: [{ dest: 'checkpoints/b', url: 'https://example.com/b' }] }] });
+    manager.state.podId = 'pod-2';
+
+    await manager.prefetchRest('pod-1');
+    assert.equal(ensures, 1);
+});

@@ -340,10 +340,17 @@ export class RunpodManager {
     async prefetchRest(podId) {
         const files = this.allCatalogFiles();
         if (!files.length) return;
-        try {
-            const result = await this.managerRequest(podId, 'POST', '/ensure', { files }, 20000);
-            if (result.queued?.length) this.log('background prefetch queued:', result.queued.join(', '));
-        } catch { /* old worker image or pod disappeared */ }
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const result = await this.managerRequest(podId, 'POST', '/ensure', { files }, 20000);
+                this.log(result.queued?.length ? `background prefetch queued: ${result.queued.join(', ')}` : 'background prefetch: nothing to queue');
+                return;
+            } catch (error) {
+                if (this.state.podId !== podId) return; // pod replaced or shut down
+                this.log(`background prefetch attempt ${attempt} failed:`, error.message);
+                if (attempt === 1) await this.sleep(5000);
+            }
+        }
     }
 
     async ensurePod(values = this.activeValues(), epoch = this.state.controlEpoch) {
