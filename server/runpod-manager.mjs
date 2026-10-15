@@ -56,6 +56,10 @@ export class RunpodManager {
                 types: [env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000'],
                 priority: 'custom',
             },
+            rtx4090: {
+                types: [env.RUNPOD_GPU_4090_TYPE ?? 'NVIDIA GeForce RTX 4090'],
+                priority: 'custom',
+            },
             rtx5090: {
                 types: [env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090'],
                 priority: 'custom',

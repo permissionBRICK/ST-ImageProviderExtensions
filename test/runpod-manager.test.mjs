@@ -107,14 +107,19 @@ test('GPU profiles request an exact card and reject unknown profile IDs', async 
         env: { RUNPOD_KEY: 'account-secret' },
         fetchImpl: async (url, options) => {
             requests.push({ url, options });
-            return response({ id: 'pod-5090', machine: { gpuTypeId: 'NVIDIA GeForce RTX 5090' } });
+            return response({ id: 'pod-exact', machine: { gpuTypeId: JSON.parse(options.body).gpuTypeIds[0] } });
         },
     });
-    manager.setCatalog({ gpu_profile: 'rtx5090' });
-    await manager.createPod([]);
-    const body = JSON.parse(requests[0].options.body);
-    assert.deepEqual(body.gpuTypeIds, ['NVIDIA GeForce RTX 5090']);
-    assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA GeForce RTX 5090');
+    for (const [profile, gpu] of [['rtx4090', 'NVIDIA GeForce RTX 4090'], ['rtx5090', 'NVIDIA GeForce RTX 5090']]) {
+        requests.length = 0;
+        manager.setCatalog({ gpu_profile: profile });
+        await manager.createPod([]);
+        const body = JSON.parse(requests[0].options.body);
+        assert.deepEqual(body.gpuTypeIds, [gpu]);
+        assert.equal(body.gpuTypePriority, 'custom');
+        assert.equal(body.env.REQUESTED_GPU_TYPE, gpu);
+        assert.equal(body.env.REQUESTED_GPU_PROFILE, profile);
+    }
     assert.throws(() => manager.setCatalog({ gpu_profile: 'h100' }), error => error.status === 400);
 });
 

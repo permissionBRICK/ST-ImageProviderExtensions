@@ -752,7 +752,7 @@ async function loadSettings() {
     if (!Array.isArray(extension_settings.sd.runpod_models)) {
         extension_settings.sd.runpod_models = [];
     }
-    if (!['a5000', 'rtx5090', 'available'].includes(extension_settings.sd.runpod_gpu_profile)) {
+    if (!['a5000', 'rtx4090', 'rtx5090', 'available'].includes(extension_settings.sd.runpod_gpu_profile)) {
         extension_settings.sd.runpod_gpu_profile = 'available';
     }
 
