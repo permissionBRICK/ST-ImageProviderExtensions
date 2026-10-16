@@ -4,15 +4,18 @@ import fetch from 'node-fetch';
 import { BootGuard } from './runpod-boot-guard.mjs';
 
 const UA = 'Mozilla/5.0 (compatible; st-image-generation-runpod)';
+const API = 'https://api.runpod.io/v2';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-// The A5000 is the slowest benchmarked card, so only its exact profile requests it.
-// The weaker A4000 is left out as well.
+// REST v2 creates one GPU type per request, so the pool is tried in this order and
+// only a no-capacity answer moves on. The slow A5000 comes last; the A4000 is left out.
 const DEFAULT_AVAILABLE_GPU_TYPES = [
-    'NVIDIA A40',
-    'NVIDIA RTX A6000',
     'NVIDIA GeForce RTX 4090',
+    'NVIDIA A40',
     'NVIDIA GeForce RTX 5090',
+    'NVIDIA RTX A5000',
 ];
+const LIVE_STATUSES = new Set(['PROVISIONING', 'STARTING', 'RUNNING']);
+const NO_CAPACITY = /no (longer any )?instances|instances? (currently )?(un)?available/i;
 
 function csv(value, fallback = '') {
     return String(value ?? fallback).split(',').map(x => x.trim()).filter(Boolean);
@@ -31,7 +34,7 @@ export class RunpodManager {
         this.now = now;
         this.sleep = sleep;
         this.pods = new Map();
-        this.downloadTiers = csv(env.RUNPOD_MIN_DOWNLOAD_TIERS, '2500,1000,0').map(value => Number(value) || null);
+        this.rateLimitRetries = Number(env.RUNPOD_RATE_LIMIT_RETRIES ?? 6);
         this.maxReplacements = Number(env.RUNPOD_MAX_REPLACEMENTS ?? 3);
         this.bootOptions = {
             containerDeadlineMs: Number(env.RUNPOD_CONTAINER_DEADLINE_SECONDS ?? 360) * 1000,
@@ -52,22 +55,10 @@ export class RunpodManager {
         this.image = env.RUNPOD_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
         const availableGpuTypes = csv(env.RUNPOD_GPU_AVAILABLE_TYPES, DEFAULT_AVAILABLE_GPU_TYPES.join(','));
         this.gpuProfiles = {
-            a5000: {
-                types: [env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000'],
-                priority: 'custom',
-            },
-            rtx4090: {
-                types: [env.RUNPOD_GPU_4090_TYPE ?? 'NVIDIA GeForce RTX 4090'],
-                priority: 'custom',
-            },
-            rtx5090: {
-                types: [env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090'],
-                priority: 'custom',
-            },
-            available: {
-                types: availableGpuTypes.length ? availableGpuTypes : [...DEFAULT_AVAILABLE_GPU_TYPES],
-                priority: 'availability',
-            },
+            a5000: { types: [env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000'] },
+            rtx4090: { types: [env.RUNPOD_GPU_4090_TYPE ?? 'NVIDIA GeForce RTX 4090'] },
+            rtx5090: { types: [env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090'] },
+            available: { types: availableGpuTypes.length ? availableGpuTypes : [...DEFAULT_AVAILABLE_GPU_TYPES] },
         };
         this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS, '13.0');
         this.podName = env.RUNPOD_POD_NAME ?? 'comfyui-lazy';
@@ -109,24 +100,46 @@ export class RunpodManager {
 
     async api(method, route, body) {
         this.requireConfigured();
-        const response = await this.fetch(`https://rest.runpod.io/v1${route}`, {
-            method,
-            headers: {
-                'Authorization': `Bearer ${this.key}`,
-                'Content-Type': 'application/json',
-                'User-Agent': UA,
-            },
-            body: body === undefined ? undefined : JSON.stringify(body),
-        });
-        if (!response.ok) {
+        for (let attempt = 0; ; attempt++) {
+            const response = await this.fetch(`${API}${route}`, {
+                method,
+                headers: {
+                    'Authorization': `Bearer ${this.key}`,
+                    'Content-Type': 'application/json',
+                    'User-Agent': UA,
+                },
+                body: body === undefined ? undefined : JSON.stringify(body),
+            });
+            if (response.ok) {
+                const text = await response.text();
+                return text ? JSON.parse(text) : {};
+            }
             const detail = (await response.text()).slice(0, 300);
+            if (response.status === 429 && attempt < this.rateLimitRetries) {
+                // Global API rate limit: wait as long as RunPod asks, else back off exponentially.
+                const retryAfter = Number(response.headers?.get?.('retry-after'));
+                const waitMs = Math.min(600_000, retryAfter > 0 ? retryAfter * 1000 : 5000 * 2 ** attempt);
+                this.log(`RunPod ${method} ${route} rate limited; retrying in ${Math.round(waitMs / 1000)}s (${attempt + 1}/${this.rateLimitRetries})`);
+                await this.sleep(waitMs);
+                continue;
+            }
+            // v2 answers a no-capacity create with 400 (v1 used 500).
             throw Object.assign(new Error(`RunPod ${method} ${route} returned ${response.status}: ${detail}`), {
                 status: response.status,
-                noCapacity: method === 'POST' && route === '/pods' && response.status >= 500 && /no (longer any )?instances|instances? (currently )?(un)?available/i.test(detail),
+                noCapacity: method === 'POST' && route === '/pods' && NO_CAPACITY.test(detail),
             });
         }
-        const text = await response.text();
-        return text ? JSON.parse(text) : {};
+    }
+
+    async listPods() {
+        const pods = [];
+        let cursor = null;
+        do {
+            const page = await this.api('GET', `/pods${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`);
+            pods.push(...(page.pods ?? []));
+            cursor = page.pagination?.hasNextPage ? page.pagination.nextCursor : null;
+        } while (cursor);
+        return pods;
     }
 
     activeValues() {
@@ -157,13 +170,13 @@ export class RunpodManager {
     async findPod() {
         if (!this.configured) return [null, null, null];
         try {
-            const pods = await this.api('GET', '/pods');
-            const pod = pods.find(item => item.name === this.podName && item.desiredStatus === 'RUNNING');
+            const pods = await this.listPods();
+            const pod = pods.find(item => item.name === this.podName && LIVE_STATUSES.has(item.status));
             if (!pod) return [null, null, null];
             return [
                 pod.id,
                 pod.env?.MODEL_KEY ?? null,
-                pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? pod.env?.REQUESTED_GPU_TYPE ?? null,
+                pod.gpu?.id ?? pod.env?.REQUESTED_GPU_TYPE ?? null,
             ];
         } catch (error) {
             this.log('pod discovery failed:', error.message);
@@ -179,10 +192,9 @@ export class RunpodManager {
         return `https://${podId}-8189.proxy.runpod.net`;
     }
 
-    async createPod(values, datacenters, minDownloadMbps = this.downloadTiers[0]) {
+    async createPod(values, datacenters, gpuType = this.requestedGpu()) {
         const files = this.neededFiles(values);
         const requestedGpus = this.requestedGpus();
-        const gpuPriority = this.requestedGpuPriority();
         const podEnv = {
             HF_TOKEN: this.env.HF_TOKEN ?? '',
             CIVITAI_TOKEN: this.env.CIVITAI_TOKEN ?? '',
@@ -192,8 +204,10 @@ export class RunpodManager {
             RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS: String(this.selfReapBootGraceSeconds),
             REQUESTED_GPU_PROFILE: this.catalog.gpuProfile,
             REQUESTED_GPU_TYPES: requestedGpus.join(','),
+            REQUESTED_GPU_TYPE: gpuType,
+            // Images built before the v2 migration default the self-reaper to REST v1.
+            RUNPOD_API_BASE: API,
         };
-        if (requestedGpus.length === 1) podEnv.REQUESTED_GPU_TYPE = requestedGpus[0];
         // RunPod's injected pod-scoped key cannot delete its own Pod, and the
         // public API cannot mint a per-Pod key. Pass the existing management
         // key only when the optional dead-man switch is enabled.
@@ -202,27 +216,23 @@ export class RunpodManager {
         else podEnv.MODELS = 'all';
         const body = {
             name: this.podName,
-            imageName: this.image,
-            gpuTypeIds: requestedGpus,
-            gpuTypePriority: gpuPriority,
-            gpuCount: 1,
-            cloudType: this.cloudType,
-            containerDiskInGb: 80,
-            volumeInGb: 0,
+            image: this.image,
+            gpu: { id: gpuType, count: 1 },
+            cloud: this.cloudType,
+            disk: 80,
             ports: ['8188/http', '8189/http'],
             env: podEnv,
-            dockerStartCmd: ['bash', '-c', `(python3 /model-manager.py &) ; (python3 /self-reaper.py &) ; python3 /boot-models.py && cd /comfyui && exec python main.py ${this.comfyArgs}`],
+            cmd: ['bash', '-c', `(python3 /model-manager.py &) ; (python3 /self-reaper.py &) ; python3 /boot-models.py && cd /comfyui && exec python main.py ${this.comfyArgs}`],
         };
         if (datacenters?.length) body.dataCenterIds = datacenters;
-        if (this.cudaVersions.length) body.allowedCudaVersions = this.cudaVersions;
-        if (minDownloadMbps) body.minDownloadMbps = minDownloadMbps;
+        if (this.cudaVersions.length) body.gpu.allowedCudaVersions = this.cudaVersions;
         const created = this.now();
         const pod = await this.api('POST', '/pods', body);
-        const meta = { created, tier: minDownloadMbps, machineId: pod.machineId ?? pod.machine?.id,
-            dataCenter: pod.machine?.dataCenterId, uplink: pod.machine?.maxDownloadSpeedMbps };
+        const gpu = pod.gpu?.id ?? gpuType;
+        const meta = { created, gpu, dataCenter: pod.dataCenterId ?? null };
         this.pods.set(pod.id, meta);
-        this.log(`created pod ${pod.id} models=${podEnv.MODEL_KEY || 'legacy-all'} GPU=${pod.machine?.gpuTypeId ?? '?'} cost=${pod.costPerHr ?? '?'} per hour tier=${meta.tier ?? 'any'} machineId=${meta.machineId ?? '?'} dataCenter=${meta.dataCenter ?? '?'} uplink=${meta.uplink ?? '?'}Mbps`);
-        return [pod.id, pod.machine?.gpuTypeId ?? pod.gpu?.displayName ?? null];
+        this.log(`created pod ${pod.id} models=${podEnv.MODEL_KEY || 'legacy-all'} GPU=${gpu} cost=${pod.cost ?? '?'} per hour dataCenter=${meta.dataCenter ?? '?'}`);
+        return [pod.id, gpu];
     }
 
     async createPodWithRetries(values, epoch) {
@@ -232,11 +242,11 @@ export class RunpodManager {
         let lastError;
         for (const [round, datacenters] of plans.entries()) {
             let exhausted = false;
-            for (const tier of this.downloadTiers) {
+            for (const gpuType of this.requestedGpus()) {
                 for (let attempt = 0; attempt < 3; attempt++) {
                     if (epoch !== this.state.controlEpoch) throw new Error('pod warmup cancelled');
                     try {
-                        const created = await this.createPod(values, datacenters, tier);
+                        const created = await this.createPod(values, datacenters, gpuType);
                         if (epoch !== this.state.controlEpoch) {
                             await this.terminate(created[0]);
                             throw new Error('pod warmup cancelled');
@@ -245,7 +255,7 @@ export class RunpodManager {
                     } catch (error) {
                         if (error.message === 'pod warmup cancelled') throw error;
                         lastError = error;
-                        this.log(`pod creation tier=${tier ?? 'any'} attempt=${attempt + 1} failed:`, error.message);
+                        this.log(`pod creation GPU=${gpuType} attempt=${attempt + 1} failed:`, error.message);
                         if (error.noCapacity) break;
                         if (error.status && error.status < 500 && error.status !== 429) {
                             exhausted = true;
@@ -255,7 +265,7 @@ export class RunpodManager {
                         await this.sleep(5000 * (attempt + 1));
                     }
                 }
-                if (exhausted) break; // only no-capacity can drop a tier
+                if (exhausted) break; // only no-capacity moves on to the next GPU type
             }
             if (round < plans.length - 1) await this.sleep(5000);
         }
@@ -418,12 +428,9 @@ export class RunpodManager {
                     if (this.now() >= guard.nextLogsAt) {
                         guard.nextLogsAt = this.now() + 10000;
                         try { guard.logs = await this.podLogs(podId); } catch { /* telemetry is optional */ }
-                        if (guard.meta.uplink == null || guard.meta.machineId == null) {
+                        if (guard.meta.dataCenter == null) {
                             try {
-                                const pod = await this.api('GET', `/pods/${podId}`);
-                                guard.meta.machineId ??= pod.machineId ?? pod.machine?.id;
-                                guard.meta.dataCenter ??= pod.machine?.dataCenterId;
-                                guard.meta.uplink ??= pod.machine?.maxDownloadSpeedMbps;
+                                guard.meta.dataCenter = (await this.api('GET', `/pods/${podId}`)).dataCenterId ?? null;
                             } catch { /* host metadata may not be assigned yet */ }
                         }
                     }
@@ -543,10 +550,6 @@ export class RunpodManager {
         return [...this.selectedGpuProfile().types];
     }
 
-    requestedGpuPriority() {
-        return this.selectedGpuProfile().priority;
-    }
-
     requestedGpu() {
         return this.requestedGpus()[0];
     }
@@ -645,7 +648,6 @@ export class RunpodManager {
             gpu_profile: this.catalog.gpuProfile,
             requested_gpu: this.requestedGpu(),
             requested_gpus: this.requestedGpus(),
-            gpu_type_priority: this.requestedGpuPriority(),
         };
     }
 

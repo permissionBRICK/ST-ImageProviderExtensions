@@ -41,7 +41,7 @@ export class BootGuard {
 
     describe() {
         const m = this.meta;
-        return `tier=${m.tier ?? 'any'} machineId=${m.machineId ?? '?'} dataCenter=${m.dataCenter ?? '?'} uplink=${m.uplink ?? '?'}Mbps container=${this.containerSeconds ?? '?'}s pull=${this.pullRate?.toFixed(1) ?? '?'}MB/s models=${this.modelRate?.toFixed(1) ?? '?'}MB/s`;
+        return `GPU=${m.gpu ?? '?'} dataCenter=${m.dataCenter ?? '?'} container=${this.containerSeconds ?? '?'}s pull=${this.pullRate?.toFixed(1) ?? '?'}MB/s models=${this.modelRate?.toFixed(1) ?? '?'}MB/s`;
     }
 
     observe(logs, now, up = false) {

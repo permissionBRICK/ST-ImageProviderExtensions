@@ -50,7 +50,7 @@ Set the following environment variables on the SillyTavern server/container, the
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `RUNPOD_KEY` | — | RunPod management API key. Create a key with Read/Write Graph API permissions and paste it here to enable RunPod support. |
+| `RUNPOD_KEY` | — | RunPod management API key. Create a key with Pods read/write permission (the manager uses RunPod REST API v2) and paste it here to enable RunPod support. |
 | `HF_TOKEN` | empty | Optional Hugging Face download token passed to the worker. |
 | `CIVITAI_TOKEN` | empty | Optional Civitai download token passed to the worker. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token passed to the worker for gated/private assets. |
@@ -63,12 +63,12 @@ Set the following environment variables on the SillyTavern server/container, the
 | `RUNPOD_GPU_A5000_TYPE` | `NVIDIA RTX A5000` | RunPod GPU ID behind the exact-card **RTX A5000 — Value** profile. |
 | `RUNPOD_GPU_4090_TYPE` | `NVIDIA GeForce RTX 4090` | RunPod GPU ID behind the exact-card **RTX 4090** profile. |
 | `RUNPOD_GPU_5090_TYPE` | `NVIDIA GeForce RTX 5090` | RunPod GPU ID behind the **RTX 5090 — Fast** profile. |
-| `RUNPOD_GPU_AVAILABLE_TYPES` | A40, A6000, RTX 4090, RTX 5090 | Comma-separated GPU pool behind the default **Available — Broad GPU pool** profile. RunPod selects according to current availability. |
+| `RUNPOD_GPU_AVAILABLE_TYPES` | RTX 4090, A40, RTX 5090, RTX A5000 | Comma-separated GPU pool behind the default **Available — Broad GPU pool** profile. Types are tried in order; the next type is requested only when RunPod has no capacity for the current one. |
 | `RUNPOD_CUDA_VERSIONS` | `13.0` | Comma-separated allowed CUDA versions. |
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | RunPod cloud type. |
 | `RUNPOD_DATACENTERS` | empty | Optional comma-separated datacenter restriction. |
 | `RUNPOD_START_TIMEOUT` | `1500` | Seconds allowed for Pod boot and model preparation. |
-| `RUNPOD_MIN_DOWNLOAD_TIERS` | `2500,1000,0` | Minimum host download Mbps ladder. `0` omits the filter. Only a no-capacity response drops a tier; transient errors retry the same tier. |
+| `RUNPOD_RATE_LIMIT_RETRIES` | `6` | Retries for RunPod API calls answered with HTTP 429. Each retry waits for `Retry-After`, or backs off exponentially from 5s (capped at 600s). |
 | `RUNPOD_CONTAINER_DEADLINE_SECONDS` | `360` | Replace a new Pod if there is still no container-start evidence after this many seconds. |
 | `RUNPOD_PULL_MIN_MBS` | `50` | Minimum image-pull throughput in decimal MB/s. |
 | `RUNPOD_PULL_JUDGE_AFTER_SECONDS` | `45` | Minimum image-pull observation span before judging speed. |
@@ -82,7 +82,7 @@ Select **ComfyUI → Managed RunPod Pod** in Image Generation. The Pod starts on
 
 The browser sends the RunPod model catalog and active selection to the server when the extension loads, on each change, and before each warm-up. The server saves the latest copy to `<data root>/_image-provider-extensions/runpod-catalog.json`, so API-only clients can warm up after a SillyTavern restart without a browser tab. A warm-up whose selection resolves to no download files is refused with HTTP 409. It does not boot the worker's legacy built-in model set.
 
-Choose **Available — Broad GPU pool** (the default), **RTX A5000 — Value**, **RTX 4090**, or **RTX 5090 — Fast** in the RunPod section. The last three profiles request an exact Secure Cloud card. Available lets RunPod select from A40, A6000, RTX 4090, and RTX 5090 according to current capacity. The A5000 is not in that pool because it was the slowest card in the warm benchmark; only the exact Value profile requests it. The A4000 is a weaker card and is not in the pool either. A5000, A40, RTX 4090, and RTX 5090 successfully completed the production Krea2 Secure Cloud benchmark; The A6000 is an additional availability option that has not yet been measured with that workflow. L40S remains excluded because no Secure capacity was available during the benchmark, while L40 and RTX 6000 Ada remain excluded because they were not measured. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
+Choose **Available — Broad GPU pool** (the default), **RTX A5000 — Value**, **RTX 4090**, or **RTX 5090 — Fast** in the RunPod section. The last three profiles request an exact Secure Cloud card. RunPod REST v2 creates one GPU type per request, so Available tries RTX 4090, A40, RTX 5090, and RTX A5000 in that order and moves to the next type only when RunPod reports no capacity; transient errors retry the same type. The A5000 comes last because it was the slowest card in the warm benchmark. The A4000 is a weaker card and is not in the pool. A5000, A40, RTX 4090, and RTX 5090 successfully completed the production Krea2 Secure Cloud benchmark. L40S remains excluded because no Secure capacity was available during the benchmark, while L40 and RTX 6000 Ada remain excluded because they were not measured. Changing the selection only updates configuration. Press Warm up to apply it, or shut down the current Pod first when using the chat-bar toggle.
 
 | Benchmarked GPU | Measured $/hr | Cold ready | Warm average | Images/$ |
 |---|---:|---:|---:|---:|
@@ -93,7 +93,7 @@ Choose **Available — Broad GPU pool** (the default), **RTX A5000 — Value**, 
 
 The boot watchdog polls RunPod's authenticated boot logs every 10 seconds. Docker layer counters measure image pulls; `boot-models` chunk counters measure model bytes actually received, including segmented downloads. The worker's static `/status` percentages and preallocated file sizes are not throughput signals. Model logs arrive roughly once per GB, so detection is delayed at low speeds and a fully stalled stream provides no rate evidence; periodic received-byte counters with timestamps in `/status` would remove that limit. Manifest `size` values provide model totals; the downloader's logged totals are the fallback. Missing, stale, or insufficient log samples disable rate decisions. Cached images need no pull samples. Container-start evidence ends the container deadline, and completed downloads end rate checks, so ComfyUI startup, model loading, and compilation are never judged. The watchdog applies to Pods created by this warm-up, leaving previously adopted Pods alone.
 
-A slow-host swap creates a Pod with the same name, GPU profile, model manifest, CUDA settings, and bandwidth ladder before deleting the old Pod. This keeps the old machine occupied during allocation. The manager logs tier, host uplink, machine ID, datacenter, container time, measured throughput, and swap count. After the cap, or if replacement creation fails, it keeps the current Pod within the original overall start timeout.
+A slow-host swap creates a Pod with the same name, GPU profile, model manifest, and CUDA settings before deleting the old Pod. This keeps the old machine occupied during allocation. There is no bandwidth pre-filter; this boot watchdog is the only slow-host filter. The manager logs GPU, datacenter, container time, measured throughput, and swap count. RunPod REST v2 no longer exposes the host uplink or machine ID. After the cap, or if replacement creation fails, it keeps the current Pod within the original overall start timeout.
 
 RunPod injects a Pod ID and a Pod-scoped API key into each Pod, but a live API test confirmed that the injected key receives HTTP 404 when it tries to delete its own Pod. The worker therefore ignores that credential. RunPod's public REST API exposes no API-key creation resource, and its [API-key documentation](https://docs.runpod.io/get-started/api-keys) only supports creating keys interactively before the target on-demand Pod exists. Because Pod write access is account-wide rather than scoped to one future Pod, a separately created key would not reduce this workload's effective Pod-management permissions. The manager therefore passes `RUNPOD_KEY` to the worker as `RUNPOD_TERMINATE_API_KEY` when self-reaping is enabled. Treat the worker image and every installed ComfyUI custom node as trusted code; set `RUNPOD_SELF_REAP_SECONDS=0` to retain only the authoritative server watchdog and avoid passing the key.
 

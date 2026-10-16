@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const API = 'https://rest.runpod.io/v1';
+const API = 'https://api.runpod.io/v2';
 const IMAGE = process.env.RUNPOD_BENCH_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:cuda13-candidate';
 const RUNS = Number(process.env.RUNPOD_BENCH_RUNS ?? 3);
 const READY_TIMEOUT_MS = Number(process.env.RUNPOD_BENCH_READY_TIMEOUT_SECONDS ?? 2700) * 1000;
@@ -63,15 +63,11 @@ async function create(candidate) {
             try {
                 const pod = await api('POST', '/pods', {
                     name: `krea2-bench-${candidate.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Date.now()}`,
-                    imageName: IMAGE,
-                    gpuTypeIds: [candidate.id],
-                    gpuCount: 1,
-                    cloudType,
-                    supportPublicIp: true,
-                    containerDiskInGb: 80,
-                    volumeInGb: 0,
+                    image: IMAGE,
+                    gpu: { id: candidate.id, count: 1, allowedCudaVersions: ['13.0'] },
+                    cloud: cloudType,
+                    disk: 80,
                     ports: ['8188/http', '8189/http'],
-                    allowedCudaVersions: ['13.0'],
                     env: {
                         HF_TOKEN: process.env.HF_TOKEN ?? '',
                         CIVITAI_TOKEN: process.env.CIVITAI_TOKEN ?? '',
@@ -80,8 +76,9 @@ async function create(candidate) {
                         MODEL_MANIFEST: JSON.stringify(files),
                         RUNPOD_SELF_REAP_SECONDS: '3600',
                         RUNPOD_SELF_REAP_BOOT_GRACE_SECONDS: '3600',
+                        RUNPOD_API_BASE: API,
                     },
-                    dockerStartCmd: ['bash', '-c', '(python3 /model-manager.py &) ; (python3 /self-reaper.py &) ; python3 /boot-models.py && cd /comfyui && exec python main.py --listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention'],
+                    cmd: ['bash', '-c', '(python3 /model-manager.py &) ; (python3 /self-reaper.py &) ; python3 /boot-models.py && cd /comfyui && exec python main.py --listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention'],
                 });
                 return { ...pod, requestedCloud: cloudType };
             } catch (error) {
@@ -173,7 +170,7 @@ async function benchmark(candidate, livePods) {
     try {
         pod = await create(candidate);
         livePods.set(pod.id, candidate.label);
-        Object.assign(result, { podId: pod.id, cloud: pod.requestedCloud, pricePerHour: pod.costPerHr ?? pod.adjustedCostPerHr ?? null });
+        Object.assign(result, { podId: pod.id, cloud: pod.requestedCloud, pricePerHour: pod.cost ?? null });
         log(candidate.label, `created ${pod.id} on ${pod.requestedCloud}; $${result.pricePerHour ?? '?'}/hr`);
         result.coldStartSeconds = await waitReady(candidate, pod);
         log(candidate.label, `ready after ${result.coldStartSeconds.toFixed(1)}s`);

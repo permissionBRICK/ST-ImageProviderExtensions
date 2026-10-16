@@ -5,7 +5,7 @@
  * RUNPOD_PROBE_KEY_MODE=management passes RUNPOD_KEY to the disposable Pod as
  * RUNPOD_TERMINATE_API_KEY. The key itself is never printed.
  */
-const API = 'https://rest.runpod.io/v1';
+const API = 'https://api.runpod.io/v2';
 const key = process.env.RUNPOD_KEY ?? '';
 const image = process.env.RUNPOD_PROBE_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
 const keyMode = process.env.RUNPOD_PROBE_KEY_MODE ?? 'injected';
@@ -52,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/delete': return self.reply(404, {'error': 'not found'})
         if not pod_id or not api_key: return self.reply(503, {'error': 'selected credentials missing'})
         request = urllib.request.Request(
-            'https://rest.runpod.io/v1/pods/' + pod_id,
+            'https://api.runpod.io/v2/pods/' + pod_id,
             headers={'Authorization': 'Bearer ' + api_key}, method='DELETE')
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
@@ -76,15 +76,14 @@ async function main() {
         if (keyMode === 'management') podEnv.RUNPOD_TERMINATE_API_KEY = key;
         const pod = await api('POST', '/pods', {
             name: `pod-${keyMode}-key-delete-proof-${Date.now()}`,
-            imageName: image,
-            gpuTypeIds: ['NVIDIA A40'], gpuTypePriority: 'custom', gpuCount: 1,
-            cloudType: 'SECURE', containerDiskInGb: 50, volumeInGb: 0,
-            allowedCudaVersions: ['13.0'], ports: ['8189/http'],
+            image,
+            gpu: { id: 'NVIDIA A40', count: 1, allowedCudaVersions: ['13.0'] },
+            cloud: 'SECURE', disk: 50, ports: ['8189/http'],
             env: podEnv,
-            dockerStartCmd: ['python3', '-c', python],
+            cmd: ['python3', '-c', python],
         });
         podId = pod.id;
-        console.log(JSON.stringify({ event: 'created', key_mode: keyMode, pod_id: podId, gpu: pod.machine?.gpuTypeId, cost_per_hour: pod.costPerHr }));
+        console.log(JSON.stringify({ event: 'created', key_mode: keyMode, pod_id: podId, gpu: pod.gpu?.id, cost_per_hour: pod.cost }));
         const base = `https://${podId}-8189.proxy.runpod.net`;
         let status;
         for (let attempt = 0; attempt < 90; attempt++) {

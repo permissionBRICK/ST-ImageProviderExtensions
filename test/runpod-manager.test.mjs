@@ -6,11 +6,20 @@ import { test } from 'node:test';
 import { RunpodManager } from '../server/runpod-manager.mjs';
 import { BootGuard } from '../server/runpod-boot-guard.mjs';
 
-function response(body = {}, status = 200) {
+const API = 'https://api.runpod.io/v2';
+const GPU_4090 = 'NVIDIA GeForce RTX 4090';
+const NO_CAPACITY_BODY = {
+    detail: 'There are no longer any instances available with the requested specifications. Please refresh and try again.',
+    status: 400,
+    title: 'Bad Request',
+};
+
+function response(body = {}, status = 200, headers = {}) {
     const text = body === null ? '' : JSON.stringify(body);
     return {
         ok: status >= 200 && status < 300,
         status,
+        headers: { get: name => headers[name.toLowerCase()] ?? null },
         text: async () => text,
         json: async () => body ?? {},
         arrayBuffer: async () => Buffer.from(text),
@@ -28,7 +37,7 @@ test('managed Pod creation passes the management key only as the self-reaper cre
         },
         fetchImpl: async (url, options) => {
             requests.push({ url, options });
-            return response({ id: 'pod-123', machine: { gpuTypeId: 'A40' }, costPerHr: 0.5 });
+            return response({ id: 'pod-123', name: 'comfyui-lazy', status: 'PROVISIONING', gpu: { id: 'NVIDIA RTX A5000', count: 1 }, dataCenterId: 'EU-RO-1', cost: 0.27 });
         },
     });
     manager.setCatalog({
@@ -37,10 +46,12 @@ test('managed Pod creation passes the management key only as the self-reaper cre
         gpu_profile: 'a5000',
     });
 
-    assert.deepEqual(await manager.createPod(manager.activeValues()), ['pod-123', 'A40']);
+    assert.deepEqual(await manager.createPod(manager.activeValues()), ['pod-123', 'NVIDIA RTX A5000']);
+    assert.deepEqual(manager.pods.get('pod-123'), { created: manager.pods.get('pod-123').created, gpu: 'NVIDIA RTX A5000', dataCenter: 'EU-RO-1' });
     const request = requests[0];
     const body = JSON.parse(request.options.body);
-    assert.equal(request.url, 'https://rest.runpod.io/v1/pods');
+    assert.equal(request.url, `${API}/pods`);
+    assert.equal(request.options.method, 'POST');
     assert.equal(request.options.headers.Authorization, 'Bearer account-secret');
     assert.equal(body.env.HF_TOKEN, 'hf-secret');
     assert.equal(body.env.RUNPOD_SELF_REAP_SECONDS, '1200');
@@ -48,12 +59,21 @@ test('managed Pod creation passes the management key only as the self-reaper cre
     assert.equal(body.env.RUNPOD_TERMINATE_API_KEY, 'account-secret');
     assert.equal(body.env.RUNPOD_KEY, undefined);
     assert.equal(body.env.RUNPOD_API_KEY, undefined, 'RunPod injects the pod-scoped key itself');
-    assert.deepEqual(body.gpuTypeIds, ['NVIDIA RTX A5000']);
-    assert.equal(body.gpuTypePriority, 'custom', 'RunPod must honor the benchmarked preference order');
+    assert.deepEqual(body.gpu, { id: 'NVIDIA RTX A5000', count: 1, allowedCudaVersions: ['13.0'] });
+    assert.equal(body.name, 'comfyui-lazy');
+    assert.equal(body.image, 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest');
+    assert.equal(body.cloud, 'SECURE');
+    assert.equal(body.disk, 80);
+    assert.deepEqual(body.ports, ['8188/http', '8189/http']);
+    assert.equal(body.dataCenterIds, undefined);
+    for (const field of ['imageName', 'gpuTypeIds', 'gpuTypePriority', 'gpuCount', 'cloudType', 'containerDiskInGb', 'volumeInGb', 'dockerStartCmd', 'minDownloadMbps', 'allowedCudaVersions']) {
+        assert.equal(body[field], undefined, `REST v1 field ${field} must not be sent`);
+    }
     assert.equal(body.env.REQUESTED_GPU_TYPE, 'NVIDIA RTX A5000');
     assert.equal(body.env.REQUESTED_GPU_PROFILE, 'a5000');
     assert.equal(body.env.REQUESTED_GPU_TYPES, 'NVIDIA RTX A5000');
-    assert.match(body.dockerStartCmd[2], /self-reaper\.py/);
+    assert.equal(body.env.RUNPOD_API_BASE, API, 'older worker images default their self-reaper to REST v1');
+    assert.match(body.cmd[2], /self-reaper\.py/);
 });
 
 test('disabling pod-local self-reaping keeps the management key out of the Pod', async () => {
@@ -62,7 +82,7 @@ test('disabling pod-local self-reaping keeps the management key out of the Pod',
         env: { RUNPOD_KEY: 'account-secret', RUNPOD_SELF_REAP_SECONDS: '0' },
         fetchImpl: async (url, options) => {
             requests.push({ url, options });
-            return response({ id: 'pod-123', machine: { gpuTypeId: 'NVIDIA RTX A5000' } });
+            return response({ id: 'pod-123', status: 'PROVISIONING', gpu: { id: GPU_4090, count: 1 } });
         },
     });
 
@@ -95,7 +115,7 @@ test('server watchdog fully deletes a Pod after its idle deadline', async () => 
     now += 2_000;
     await manager.reapIdle();
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, 'https://rest.runpod.io/v1/pods/pod-idle');
+    assert.equal(requests[0].url, `${API}/pods/pod-idle`);
     assert.equal(requests[0].options.method, 'DELETE');
     assert.equal(manager.state.podId, null);
     assert.equal(manager.state.phase, 'red');
@@ -107,49 +127,72 @@ test('GPU profiles request an exact card and reject unknown profile IDs', async 
         env: { RUNPOD_KEY: 'account-secret' },
         fetchImpl: async (url, options) => {
             requests.push({ url, options });
-            return response({ id: 'pod-exact', machine: { gpuTypeId: JSON.parse(options.body).gpuTypeIds[0] } });
+            return response({ id: 'pod-exact', gpu: { id: JSON.parse(options.body).gpu.id, count: 1 } });
         },
     });
     for (const [profile, gpu] of [['rtx4090', 'NVIDIA GeForce RTX 4090'], ['rtx5090', 'NVIDIA GeForce RTX 5090']]) {
         requests.length = 0;
         manager.setCatalog({ gpu_profile: profile });
-        await manager.createPod([]);
+        assert.deepEqual(await manager.createPod([]), ['pod-exact', gpu]);
         const body = JSON.parse(requests[0].options.body);
-        assert.deepEqual(body.gpuTypeIds, [gpu]);
-        assert.equal(body.gpuTypePriority, 'custom');
+        assert.equal(body.gpu.id, gpu);
+        assert.equal(body.gpu.count, 1);
         assert.equal(body.env.REQUESTED_GPU_TYPE, gpu);
+        assert.equal(body.env.REQUESTED_GPU_TYPES, gpu);
         assert.equal(body.env.REQUESTED_GPU_PROFILE, profile);
     }
     assert.throws(() => manager.setCatalog({ gpu_profile: 'h100' }), error => error.status === 400);
 });
 
-test('Available GPU profile lets RunPod select from the configured Secure Cloud pool', async () => {
+const DEFAULT_POOL = ['NVIDIA GeForce RTX 4090', 'NVIDIA A40', 'NVIDIA GeForce RTX 5090', 'NVIDIA RTX A5000'];
+
+test('Available GPU profile creates one GPU type per request, starting with the first pool entry', async () => {
     const requests = [];
     const manager = new RunpodManager({
         env: { RUNPOD_KEY: 'account-secret' },
         fetchImpl: async (url, options) => {
             requests.push({ url, options });
-            return response({ id: 'pod-available', machine: { gpuTypeId: 'NVIDIA A40' } });
+            return response({ id: 'pod-available', gpu: { id: JSON.parse(options.body).gpu.id, count: 1 } });
         },
     });
     assert.equal(manager.catalog.gpuProfile, 'available', 'Available must be the server default before catalog sync');
 
-    assert.deepEqual(await manager.createPod([]), ['pod-available', 'NVIDIA A40']);
+    assert.deepEqual(await manager.createPod([]), ['pod-available', GPU_4090]);
     const body = JSON.parse(requests[0].options.body);
-    assert.deepEqual(body.gpuTypeIds, [
-        'NVIDIA A40',
-        'NVIDIA RTX A6000',
-        'NVIDIA GeForce RTX 4090',
-        'NVIDIA GeForce RTX 5090',
-    ]);
-    assert.equal(body.gpuTypePriority, 'availability');
+    assert.equal(body.gpu.id, GPU_4090);
     assert.equal(body.env.REQUESTED_GPU_PROFILE, 'available');
-    assert.equal(body.env.REQUESTED_GPU_TYPES, body.gpuTypeIds.join(','));
-    assert.equal(body.env.REQUESTED_GPU_TYPE, undefined);
+    assert.equal(body.env.REQUESTED_GPU_TYPES, DEFAULT_POOL.join(','));
+    assert.equal(body.env.REQUESTED_GPU_TYPE, GPU_4090);
+
+    requests.length = 0;
+    assert.deepEqual(await manager.createPod([], null, 'NVIDIA A40'), ['pod-available', 'NVIDIA A40']);
+    const second = JSON.parse(requests[0].options.body);
+    assert.equal(second.gpu.id, 'NVIDIA A40');
+    assert.equal(second.env.REQUESTED_GPU_TYPE, 'NVIDIA A40', 'the env hint names the type actually requested');
 
     const status = await manager.status({ probe: false });
-    assert.deepEqual(status.requested_gpus, body.gpuTypeIds);
-    assert.equal(status.gpu_type_priority, 'availability');
+    assert.deepEqual(status.requested_gpus, DEFAULT_POOL);
+    assert.equal(status.requested_gpu, GPU_4090);
+    assert.equal(status.gpu_type_priority, undefined);
+});
+
+test('default Available profile tries RTX 4090 -> A40 -> RTX 5090 -> RTX A5000 on no-capacity', async () => {
+    const bodies = [];
+    const waits = [];
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'test-key' },
+        sleep: async ms => waits.push(ms),
+        fetchImpl: async (url, options) => {
+            bodies.push(JSON.parse(options.body));
+            return response(NO_CAPACITY_BODY, 400);
+        },
+    });
+    manager.log = () => {};
+    await assert.rejects(manager.createPodWithRetries([], 0), /could not create pod:.*400.*no longer any instances/);
+    assert.deepEqual(bodies.map(body => body.gpu.id), [...DEFAULT_POOL, ...DEFAULT_POOL, ...DEFAULT_POOL]);
+    assert.ok(bodies.every(body => body.env.REQUESTED_GPU_TYPE === body.gpu.id));
+    assert.deepEqual(waits, [5000, 5000], 'only the datacenter plan rounds back off');
+    assert.equal(manager.state.phase, 'red');
 });
 
 test('Available GPU pool can be overridden without allowing an empty pool', () => {
@@ -161,7 +204,7 @@ test('Available GPU pool can be overridden without allowing an empty pool', () =
 
     const empty = new RunpodManager({ env: { RUNPOD_KEY: 'account-secret', RUNPOD_GPU_AVAILABLE_TYPES: '' } });
     empty.setCatalog({ gpu_profile: 'available' });
-    assert.equal(empty.requestedGpus().length, 4);
+    assert.deepEqual(empty.requestedGpus(), DEFAULT_POOL);
 });
 
 test('Available profile adopts a running Pod whose assigned GPU is in the pool', async () => {
@@ -177,19 +220,92 @@ test('Available profile adopts a running Pod whose assigned GPU is in the pool',
     assert.equal(manager.state.phase, 'green');
 });
 
-test('Pod discovery records the assigned GPU rather than an exact-profile request hint', async () => {
+test('Pod discovery records the assigned GPU rather than the request hint and skips dead Pods', async () => {
     const manager = new RunpodManager({
         env: { RUNPOD_KEY: 'account-secret' },
-        fetchImpl: async () => response([{
-            id: 'pod-a40',
-            name: 'comfyui-lazy',
-            desiredStatus: 'RUNNING',
-            env: { MODEL_KEY: 'model.gguf', REQUESTED_GPU_TYPE: 'NVIDIA RTX A5000' },
-            machine: { gpuTypeId: 'NVIDIA A40' },
-        }]),
+        fetchImpl: async () => response({
+            pods: [
+                { id: 'pod-old', name: 'comfyui-lazy', status: 'EXITED', gpu: { id: 'NVIDIA A40', count: 1 }, env: {} },
+                { id: 'pod-other', name: 'something-else', status: 'RUNNING', gpu: { id: 'NVIDIA A40', count: 1 }, env: {} },
+                {
+                    id: 'pod-a40',
+                    name: 'comfyui-lazy',
+                    status: 'RUNNING',
+                    env: { MODEL_KEY: 'model.gguf', REQUESTED_GPU_TYPE: 'NVIDIA RTX A5000' },
+                    gpu: { id: 'NVIDIA A40', count: 1 },
+                },
+            ],
+            pagination: { hasNextPage: false },
+        }),
     });
 
     assert.deepEqual(await manager.findPod(), ['pod-a40', 'model.gguf', 'NVIDIA A40']);
+});
+
+test('Pod discovery adopts provisioning Pods and falls back to the request hint without a GPU', async () => {
+    for (const status of ['PROVISIONING', 'STARTING']) {
+        const manager = new RunpodManager({
+            env: { RUNPOD_KEY: 'account-secret' },
+            fetchImpl: async () => response({ pods: [{ id: 'pod-new', name: 'comfyui-lazy', status, env: { MODEL_KEY: 'm', REQUESTED_GPU_TYPE: GPU_4090 } }] }),
+        });
+        assert.deepEqual(await manager.findPod(), ['pod-new', 'm', GPU_4090]);
+    }
+});
+
+test('Pod discovery follows pagination cursors across pages', async () => {
+    const urls = [];
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'account-secret' },
+        fetchImpl: async (url, options) => {
+            urls.push(url);
+            assert.equal(options.method, 'GET');
+            if (url === `${API}/pods`) return response({
+                pods: [{ id: 'pod-x', name: 'unrelated', status: 'RUNNING', gpu: { id: 'NVIDIA A40', count: 1 } }],
+                pagination: { hasNextPage: true, nextCursor: 'page/2=' },
+            });
+            if (url === `${API}/pods?cursor=page%2F2%3D`) return response({
+                pods: [{ id: 'pod-mine', name: 'comfyui-lazy', status: 'RUNNING', gpu: { id: GPU_4090, count: 1 }, env: { MODEL_KEY: 'k' } }],
+                pagination: { hasNextPage: false, nextCursor: null },
+            });
+            throw new Error(`unexpected URL ${url}`);
+        },
+    });
+    assert.deepEqual(await manager.findPod(), ['pod-mine', 'k', GPU_4090]);
+    assert.deepEqual(urls, [`${API}/pods`, `${API}/pods?cursor=page%2F2%3D`]);
+});
+
+test('api() retries HTTP 429 using Retry-After, then exponential backoff, capped at 600s', async () => {
+    const waits = [];
+    const replies = [
+        response({ detail: 'rate limited', status: 429 }, 429, { 'retry-after': '7' }),
+        response({ detail: 'rate limited', status: 429 }, 429),
+        response({ detail: 'rate limited', status: 429 }, 429, { 'retry-after': '9999' }),
+        response({ pods: [] }),
+    ];
+    let calls = 0;
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'test-key' },
+        sleep: async ms => waits.push(ms),
+        fetchImpl: async () => replies[calls++],
+    });
+    manager.log = () => {};
+    assert.deepEqual(await manager.api('GET', '/pods'), { pods: [] });
+    assert.equal(calls, 4);
+    assert.deepEqual(waits, [7000, 10000, 600000]);
+});
+
+test('api() gives up after RUNPOD_RATE_LIMIT_RETRIES and surfaces the 429', async () => {
+    const waits = [];
+    let calls = 0;
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'test-key', RUNPOD_RATE_LIMIT_RETRIES: '2' },
+        sleep: async ms => waits.push(ms),
+        fetchImpl: async () => { calls++; return response({ detail: 'rate limited' }, 429); },
+    });
+    manager.log = () => {};
+    await assert.rejects(manager.api('DELETE', '/pods/pod-1'), error => error.status === 429 && !error.noCapacity);
+    assert.equal(calls, 3);
+    assert.deepEqual(waits, [5000, 10000]);
 });
 
 test('frontend lease prevents idle cleanup until the lease expires', async () => {
@@ -241,7 +357,7 @@ test('generation proxies a ready Pod directly and never provisions implicitly', 
     });
 
     await assert.rejects(() => manager.generate('{"prompt":{}}'), error => error.status === 503);
-    assert.equal(requests.some(request => request.url === 'https://rest.runpod.io/v1/pods'), false);
+    assert.equal(requests.some(request => request.url.startsWith(API)), false);
 
     Object.assign(manager.state, { podId: 'pod-ready', phase: 'green' });
     assert.deepEqual(await manager.generate('{"prompt":{"1":{}}}'), {
@@ -266,12 +382,12 @@ function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {} } = {})
         sleep: async ms => { now += ms; },
         fetchImpl: async (url, options = {}) => {
             requests.push({ url, method: options.method ?? 'GET', body: options.body });
-            if (url === 'https://rest.runpod.io/v1/pods' && options.method === 'GET') return response([]);
-            if (url === 'https://rest.runpod.io/v1/pods' && options.method === 'POST') {
+            if (url === `${API}/pods` && options.method === 'GET') return response({ pods: [], pagination: { hasNextPage: false } });
+            if (url === `${API}/pods` && options.method === 'POST') {
                 const id = `pod-${++count}`;
                 createdAt.set(id, now);
                 if (count === 2 && cancelAt === 'create') await manager.shutdown();
-                return response({ id, machineId: 'opaque-id', machine: { gpuTypeId: 'NVIDIA A40', dataCenterId: 'region', maxDownloadSpeedMbps: 10000 } });
+                return response({ id, name: 'comfyui-lazy', status: 'PROVISIONING', gpu: { id: JSON.parse(options.body).gpu.id, count: 1 }, dataCenterId: 'region', cost: 0.69 });
             }
             if (options.method === 'DELETE') {
                 if (count === 2 && cancelAt === 'delete' && !cancelling && url.endsWith('/pod-1')) {
@@ -306,7 +422,7 @@ function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {} } = {})
     return { manager, requests, count: () => count };
 }
 
-test('no-capacity drops bandwidth tiers immediately and preserves GPU, CUDA and datacenter options', async () => {
+test('no-capacity moves to the next GPU type and preserves CUDA and datacenter options', async () => {
     const bodies = [];
     const waits = [];
     const manager = new RunpodManager({
@@ -314,34 +430,46 @@ test('no-capacity drops bandwidth tiers immediately and preserves GPU, CUDA and 
         sleep: async ms => waits.push(ms),
         fetchImpl: async (url, options) => {
             bodies.push(JSON.parse(options.body));
-            return bodies.length < 3 ? response({ error: 'create pod: There are no instances currently available' }, 500) : response({ id: 'pod-1' });
+            return bodies.length < 3 ? response(NO_CAPACITY_BODY, 400) : response({ id: 'pod-1', gpu: { id: 'NVIDIA GeForce RTX 5090', count: 1 } });
         },
     });
     manager.log = () => {};
-    await manager.createPodWithRetries([], 0);
-    assert.deepEqual(bodies.map(body => body.minDownloadMbps), [2500, 1000, undefined]);
-    assert.deepEqual(waits, []);
-    const { minDownloadMbps, ...first } = bodies[0];
-    for (const body of bodies.slice(1)) {
-        const { minDownloadMbps, ...rest } = body;
-        assert.deepEqual(rest, first);
-    }
-    assert.deepEqual(first.dataCenterIds, ['region']);
-    assert.deepEqual(first.allowedCudaVersions, ['13.0']);
-    assert.equal(first.gpuTypePriority, 'availability');
+    assert.deepEqual(await manager.createPodWithRetries([], 0), ['pod-1', 'NVIDIA GeForce RTX 5090']);
+    assert.deepEqual(bodies.map(body => body.gpu.id), DEFAULT_POOL.slice(0, 3));
+    assert.deepEqual(waits, [], 'no-capacity must not back off');
+    const strip = ({ gpu: { id, ...gpu }, env: { REQUESTED_GPU_TYPE, ...env }, ...rest }) => ({ ...rest, gpu, env });
+    for (const body of bodies.slice(1)) assert.deepEqual(strip(body), strip(bodies[0]));
+    assert.deepEqual(bodies[0].dataCenterIds, ['region']);
+    assert.deepEqual(bodies[0].gpu.allowedCudaVersions, ['13.0']);
 });
 
-test('transient create failures retry the same tier and never relax it', async () => {
-    const tiers = [];
+test('no-capacity is recognised from the RFC 9457 400 body', async () => {
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, fetchImpl: async () => response(NO_CAPACITY_BODY, 400) });
+    await assert.rejects(manager.api('POST', '/pods', {}), error => error.status === 400 && error.noCapacity === true);
+});
+
+test('a 4xx without the no-capacity message does not move on to another GPU type', async () => {
+    const gpus = [];
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async () => {}, fetchImpl: async (url, options) => {
+        gpus.push(JSON.parse(options.body).gpu.id);
+        return response({ detail: 'image is invalid', status: 400, title: 'Bad Request' }, 400);
+    } });
+    manager.log = () => {};
+    await assert.rejects(manager.createPodWithRetries([], 0), /could not create pod:.*400.*image is invalid/);
+    assert.deepEqual(gpus, [GPU_4090, GPU_4090, GPU_4090], 'one attempt per datacenter plan round');
+});
+
+test('transient create failures retry the same GPU type', async () => {
+    const gpus = [];
     const waits = [];
     const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async ms => waits.push(ms),
         fetchImpl: async (url, options) => {
-            tiers.push(JSON.parse(options.body).minDownloadMbps);
-            return tiers.length === 1 ? response({ error: 'temporary gateway failure' }, 502) : response({ id: 'pod-1' });
+            gpus.push(JSON.parse(options.body).gpu.id);
+            return gpus.length === 1 ? response({ detail: 'temporary gateway failure' }, 502) : response({ id: 'pod-1', gpu: { id: GPU_4090, count: 1 } });
         } });
     manager.log = () => {};
     await manager.createPodWithRetries([], 0);
-    assert.deepEqual(tiers, [2500, 2500]);
+    assert.deepEqual(gpus, [GPU_4090, GPU_4090]);
     assert.deepEqual(waits, [5000]);
 });
 
@@ -364,6 +492,15 @@ test('fast cached-image boot keeps the first Pod', async () => {
     assert.equal(count(), 1);
     assert.equal(requests.some(r => r.method === 'DELETE'), false);
     assert.equal(manager.state.boot.containerSeconds, 2);
+    assert.equal(manager.state.boot.gpu, GPU_4090);
+    assert.equal(manager.state.boot.dataCenter, 'region');
+    for (const field of ['tier', 'machineId', 'uplink']) assert.equal(manager.state.boot[field], undefined);
+});
+
+test('boot guard describe() reports GPU and datacenter', () => {
+    const g = new BootGuard({ created: 0, gpu: 'NVIDIA A40', dataCenter: 'EU-RO-1' }, [], guardOptions);
+    assert.equal(g.describe(), 'GPU=NVIDIA A40 dataCenter=EU-RO-1 container=?s pull=?MB/s models=?MB/s');
+    assert.match(new BootGuard({ created: 0 }, [], guardOptions).describe(), /^GPU=\? dataCenter=\? /);
 });
 
 test('slow-host swap cap accepts the fourth Pod without creating a fifth', async () => {
@@ -500,41 +637,41 @@ test('same-second container start logs survive local millisecond timestamps', ()
     assert.equal(g.containerSeconds, 0);
 });
 
-test('alternate RunPod no-capacity message immediately lowers the bandwidth tier', async () => {
-    const tiers = [];
-    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async () => assert.fail('no-capacity must not back off on the same tier'), fetchImpl: async (url, options) => {
-        tiers.push(JSON.parse(options.body).minDownloadMbps);
-        return tiers.length === 1 ? response({ error: 'There are no longer any instances available with the requested specifications' }, 500) : response({ id: 'pod-1' });
+test('alternate RunPod no-capacity message moves on to the next GPU type at any status', async () => {
+    const gpus = [];
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async () => assert.fail('no-capacity must not back off on the same GPU type'), fetchImpl: async (url, options) => {
+        gpus.push(JSON.parse(options.body).gpu.id);
+        return gpus.length === 1 ? response({ error: 'create pod: There are no instances currently available' }, 500) : response({ id: 'pod-1', gpu: { id: 'NVIDIA A40', count: 1 } });
     } });
     manager.log = () => {};
-    await manager.createPodWithRetries([], 0);
-    assert.deepEqual(tiers, [2500, 1000]);
+    assert.deepEqual(await manager.createPodWithRetries([], 0), ['pod-1', 'NVIDIA A40']);
+    assert.deepEqual(gpus, [GPU_4090, 'NVIDIA A40']);
 });
 
-test('exhausted transient retries advance datacenter plans without dropping the tier', async () => {
+test('exhausted transient retries advance datacenter plans without dropping the GPU type', async () => {
     const bodies = [];
     const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key', RUNPOD_DATACENTERS: 'region' }, sleep: async () => {}, fetchImpl: async (url, options) => {
         bodies.push(JSON.parse(options.body));
-        return bodies.length <= 6 ? response({ error: 'gateway failed' }, 503) : response({ id: 'pod-1' });
+        return bodies.length <= 6 ? response({ detail: 'gateway failed' }, 503) : response({ id: 'pod-1', gpu: { id: GPU_4090, count: 1 } });
     } });
     manager.log = () => {};
     await manager.createPodWithRetries([], 0);
     assert.equal(bodies.length, 7);
-    assert.ok(bodies.every(body => body.minDownloadMbps === 2500));
+    assert.ok(bodies.every(body => body.gpu.id === GPU_4090));
     assert.deepEqual(bodies[5].dataCenterIds, ['region']);
     assert.equal(bodies[6].dataCenterIds, undefined);
 });
 
-test('429 retries the same tier and permanent create failure sets red with a wrapped error', async () => {
-    const tiers = [];
-    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, sleep: async () => {}, fetchImpl: async (url, options) => {
-        tiers.push(JSON.parse(options.body).minDownloadMbps);
-        return response({ error: 'rate limited' }, 429);
+test('429 that outlasts api() retries retries the same GPU type and permanent failure sets red', async () => {
+    const gpus = [];
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key', RUNPOD_RATE_LIMIT_RETRIES: '1' }, sleep: async () => {}, fetchImpl: async (url, options) => {
+        gpus.push(JSON.parse(options.body).gpu.id);
+        return response({ detail: 'rate limited' }, 429);
     } });
     manager.log = () => {};
     await assert.rejects(manager.createPodWithRetries([], 0), /could not create pod:.*429/);
-    assert.equal(tiers.length, 9);
-    assert.ok(tiers.every(tier => tier === 2500));
+    assert.equal(gpus.length, 18, '3 rounds x 3 create attempts x (1 + 1 api() retry)');
+    assert.ok(gpus.every(gpu => gpu === GPU_4090));
     assert.equal(manager.state.phase, 'red');
 });
 
