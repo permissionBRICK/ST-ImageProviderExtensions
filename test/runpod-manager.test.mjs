@@ -26,6 +26,53 @@ function response(body = {}, status = 200, headers = {}) {
     };
 }
 
+// Comfy worker image (ghcr, latest): 14 layers, 3.82 GB. The three largest sizes
+// are real; the small layers are invented to sum to the measured total.
+const BIG = 'f4d2483a1161';
+const MID = '91033c7f60cb';
+const SMALL = 'b9c4a5bd6ace';
+const L120 = 'c0ffee000120';
+const TINY = [['a10000000001', 30_000_000], ['a10000000002', 12_000_000], ['a10000000003', 5_000_000], ['a10000000004', 3_000_000],
+    ['a10000000005', 1_500_000], ['a10000000006', 1_000_000], ['a10000000007', 500_000], ['a10000000008', 300_000],
+    ['a10000000009', 200_000], ['a1000000000a', 74_606]];
+const COMFY_LAYERS = [...TINY, [SMALL, 68684114], [L120, 120_000_000], [MID, 703485424], [BIG, 2874255856]];
+const COMFY_TOTAL = COMFY_LAYERS.reduce((sum, [, size]) => sum + size, 0);
+const comfyImage = () => ({ layers: new Map(COMFY_LAYERS), total: COMFY_TOTAL });
+const comfyManifest = () => ({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    config: { digest: `sha256:${'c'.repeat(64)}`, size: 1000 },
+    layers: COMFY_LAYERS.map(([id, size]) => ({ mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', digest: `sha256:${id}${'0'.repeat(52)}`, size })),
+});
+// [seconds since the first Downloading line, layer id or null, text]
+const pullStart = [...COMFY_LAYERS.map(([id]) => [0, id, 'Pulling fs layer']), ...TINY.map(([id], i) => [0, id, 'Downloading']),
+    ...TINY.map(([id], i) => [1 + (i % 3), id, 'Verifying Checksum']), ...TINY.map(([id], i) => [1 + (i % 3), id, 'Download complete'])];
+// Healthy measured comfy boot: small layers in 3 s, 0.94 GB done at 16 s, all done at 61 s.
+const HEALTHY_PULL = [...pullStart,
+    [1, SMALL, 'Downloading'], [7, SMALL, 'Verifying Checksum'], [7, SMALL, 'Download complete'],
+    [2, L120, 'Downloading'], [12, L120, 'Download complete'],
+    [2, MID, 'Downloading'], [16, MID, 'Verifying Checksum'], [16, MID, 'Download complete'],
+    [3, BIG, 'Downloading'], [61, BIG, 'Verifying Checksum'], [61, BIG, 'Download complete'],
+    ...COMFY_LAYERS.map(([id], i) => [62 + i * 3, id, 'Extracting']), ...COMFY_LAYERS.map(([id], i) => [63 + i * 3, id, 'Pull complete']),
+    [110, null, 'Status: Downloaded newer image for ghcr.io/permissionbrick/comfyui-runpod-worker:latest'],
+    [111, null, 'start container for ghcr.io/permissionbrick/comfyui-runpod-worker:latest: begin']];
+// A 40 MB/s host that finishes downloading at 94 s.
+const STEADY_PULL = [...pullStart,
+    [1, SMALL, 'Downloading'], [5, SMALL, 'Download complete'], [2, L120, 'Downloading'], [6, L120, 'Download complete'],
+    [2, MID, 'Downloading'], [22, MID, 'Download complete'], [3, BIG, 'Downloading'], [94, BIG, 'Download complete'],
+    ...COMFY_LAYERS.map(([id], i) => [95 + i * 2, id, 'Extracting']), ...COMFY_LAYERS.map(([id], i) => [96 + i * 2, id, 'Pull complete']),
+    [124, null, 'Status: Downloaded newer image for ghcr.io/permissionbrick/comfyui-runpod-worker:latest'],
+    [125, null, 'start container for ghcr.io/permissionbrick/comfyui-runpod-worker:latest: begin']];
+// Slow host: small layers arrive, the 2.87 GB layer is still downloading and 0.82 GB is still queued.
+const QUEUED_PULL = [...pullStart, [1, SMALL, 'Downloading'], [1, BIG, 'Downloading'], [1, MID, 'Waiting'], [1, L120, 'Waiting']];
+// Slow host with every layer in flight: everything but the 2.87 GB layer is done by 70 s.
+const BIG_LAST_PULL = [...pullStart,
+    [1, SMALL, 'Downloading'], [9, SMALL, 'Download complete'], [1, L120, 'Downloading'], [20, L120, 'Download complete'],
+    [1, MID, 'Downloading'], [70, MID, 'Download complete'], [4, BIG, 'Downloading']];
+function layerLines(events, until) {
+    return events.filter(([t]) => t <= until).sort((a, b) => a[0] - b[0]).map(([t, id, text]) => [t, id ? `${id} ${text}` : text]);
+}
+
 test('managed Pod creation passes the management key only as the self-reaper credential', async () => {
     const requests = [];
     const manager = new RunpodManager({
@@ -61,7 +108,7 @@ test('managed Pod creation passes the management key only as the self-reaper cre
     assert.equal(body.env.RUNPOD_API_KEY, undefined, 'RunPod injects the pod-scoped key itself');
     assert.deepEqual(body.gpu, { id: 'NVIDIA RTX A5000', count: 1, allowedCudaVersions: ['13.0'] });
     assert.equal(body.name, 'comfyui-lazy');
-    assert.equal(body.image, 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest');
+    assert.equal(body.image, 'docker.io/permissionbrick/comfyui-runpod-worker:latest');
     assert.equal(body.cloud, 'SECURE');
     assert.equal(body.disk, 80);
     assert.deepEqual(body.ports, ['8188/http', '8189/http']);
@@ -369,7 +416,7 @@ test('generation proxies a ready Pod directly and never provisions implicitly', 
     assert.equal(manager.state.activeRequests, 0);
 });
 
-function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {} } = {}) {
+function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {}, readyAfter = 10, extra = null } = {}) {
     let now = Date.parse('2026-01-01T00:00:00Z');
     const requests = [];
     const createdAt = new Map();
@@ -381,7 +428,9 @@ function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {} } = {})
         now: () => now,
         sleep: async ms => { now += ms; },
         fetchImpl: async (url, options = {}) => {
-            requests.push({ url, method: options.method ?? 'GET', body: options.body });
+            requests.push({ url, method: options.method ?? 'GET', body: options.body, headers: options.headers });
+            const handled = await extra?.(url, options, { now, createdAt });
+            if (handled) return handled;
             if (url === `${API}/pods` && options.method === 'GET') return response({ pods: [], pagination: { hasNextPage: false } });
             if (url === `${API}/pods` && options.method === 'POST') {
                 const id = `pod-${++count}`;
@@ -400,7 +449,7 @@ function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {} } = {})
             if (!id) throw new Error(`unexpected URL ${url}`);
             const age = (now - createdAt.get(id)) / 1000;
             const slow = kind !== 'fast' && (kind === 'cap' || id === 'pod-1');
-            if (url.endsWith('/system_stats')) return response({}, !slow && age >= 10 || kind === 'cap' && count === cap + 1 && age >= 80 ? 200 : 503);
+            if (url.endsWith('/system_stats')) return response({}, !slow && age >= readyAfter || kind === 'cap' && count === cap + 1 && age >= 80 ? 200 : 503);
             if (url.endsWith('/status')) return response({ present: [], downloading: { 'unet/model.bin': 0 } }, kind === 'model' || !slow ? 200 : 503);
             if (url.endsWith('/activity') || url.endsWith('/ensure')) return response({});
             if (url.endsWith('/logs')) {
@@ -410,6 +459,7 @@ function bootFixture({ kind = 'pull', cap = 3, cancelAt = null, env = {} } = {})
                     line(id, 0, 'boot-models: GET unet/model.bin <- https://example.com/model (10.0GB, ranges=True)'),
                     ...[30, 60, 90].filter(t => t <= age).map(t => line(id, t, `boot-models: ... unet/model.bin ${(t / 30).toFixed(1)}GB @ 33MB/s (8 streams)`)),
                 ] });
+                if (kind === 'layers' && slow) return response({ container: [], system: layerLines(QUEUED_PULL, age).map(([t, text]) => line(id, t, text)) });
                 if (!slow) return response({ system: [line(id, 1, 'Status: Image is up to date'), line(id, 2, 'start container begin')], container: [] });
                 return response({ container: [], system: Array.from({ length: Math.floor(age / 10) + 1 }, (_, i) => line(id, i * 10, `012345abcdef Downloading [==> ] ${(i * 0.1).toFixed(1)}GB/10.0GB`)) });
             }
@@ -494,12 +544,14 @@ test('fast cached-image boot keeps the first Pod', async () => {
     assert.equal(manager.state.boot.containerSeconds, 2);
     assert.equal(manager.state.boot.gpu, GPU_4090);
     assert.equal(manager.state.boot.dataCenter, 'region');
-    for (const field of ['tier', 'machineId', 'uplink']) assert.equal(manager.state.boot[field], undefined);
+    for (const field of ['tier', 'machineId', 'uplink']) assert.equal(manager.state.boot[field], undefined, 'GraphQL unavailable in this fixture');
 });
 
 test('boot guard describe() reports GPU and datacenter', () => {
     const g = new BootGuard({ created: 0, gpu: 'NVIDIA A40', dataCenter: 'EU-RO-1' }, [], guardOptions);
-    assert.equal(g.describe(), 'GPU=NVIDIA A40 dataCenter=EU-RO-1 container=?s pull=?MB/s models=?MB/s');
+    assert.equal(g.describe(), 'GPU=NVIDIA A40 dataCenter=EU-RO-1 machine=? uplink=?Mbps disk=?MB/s container=?s pull=?MB/s models=?MB/s');
+    const host = new BootGuard({ created: 0, gpu: 'RTX 5090', dataCenter: 'EU-RO-1', machineId: 'tqeq6ynqjp7b', uplink: 5832, diskMBps: 14801 }, [], guardOptions);
+    assert.match(host.describe(), / machine=tqeq6ynqjp7b uplink=5832Mbps disk=14801MB\/s /);
     assert.match(new BootGuard({ created: 0 }, [], guardOptions).describe(), /^GPU=\? dataCenter=\? /);
 });
 
@@ -746,4 +798,161 @@ test('background prefetch does not retry for a Pod that is no longer tracked', a
 
     await manager.prefetchRest('pod-1');
     assert.equal(ensures, 1);
+});
+
+const boundOptions = { ...guardOptions, boundMin: 25, boundAfterMs: 30000, minUplinkMbps: 1000 };
+function layerGuard(meta = {}, image = comfyImage(), options = boundOptions) {
+    const g = new BootGuard({ created: 0, ...meta }, [], options);
+    g.imageLayers = image;
+    return g;
+}
+const layerLogs = (events, seconds) => ({ system: guardedLogs(layerLines(events, seconds)), container: [] });
+
+for (const [name, events, end] of [['measured comfy boot', HEALTHY_PULL, 130], ['40 MB/s host finishing at 94 s', STEADY_PULL, 140]]) {
+    test(`pull-bound rule does not fire for a healthy pull at the default 40 MB/s floor: ${name}`, () => {
+        const g = layerGuard({}, comfyImage(), { ...boundOptions, boundMin: 40 });
+        for (let t = 0; t <= end; t += 5) assert.equal(g.observe(layerLogs(events, t), t * 1000), null, `t=${t}`);
+        assert.ok(g.containerSeconds > 100);
+        assert.ok(g.pullLower > 40, `lower bound ${g.pullLower}`);
+        assert.match(g.describe(), /pull>=\d+\.\dMB\/s/);
+    });
+}
+
+test('pull-bound lower estimate is done bytes over time to the last completed layer', () => {
+    const g = layerGuard();
+    g.observe(layerLogs(HEALTHY_PULL, 70), 70000);
+    assert.ok(Math.abs(g.pullLower - COMFY_TOTAL / 61 / 1e6) < 0.01);
+    assert.match(g.describe(), / pull>=62\.6MB\/s /);
+});
+
+test('pull-bound rule fires when the big layer is still downloading and others are queued', () => {
+    const g = layerGuard();
+    for (let t = 0; t < 120; t += 10) assert.equal(g.observe(layerLogs(QUEUED_PULL, t), t * 1000), null, `t=${t}`);
+    const why = g.observe(layerLogs(QUEUED_PULL, 120), 120000);
+    assert.match(why, /^image pull at most 25\.0 MB\/s \(<25\) after 120s, 0\.05\/3\.82GB layers done$/);
+    assert.ok(g.pullBound < 25);
+});
+
+test('pull-bound rule fires once even all in-flight layers cannot explain the elapsed time', () => {
+    const g = layerGuard();
+    assert.equal(g.observe(layerLogs(BIG_LAST_PULL, 120), 120000), null, 'all 3.82 GB in flight at 120s still allows 31.8 MB/s');
+    assert.match(g.observe(layerLogs(BIG_LAST_PULL, 160), 160000), /at most 23\.9 MB\/s .* after 160s, 0\.95\/3\.82GB/);
+});
+
+test('pull-bound rule waits for the judge-after span and honours the floor switch', () => {
+    const stalled = pullStart;
+    assert.equal(layerGuard().observe(layerLogs(stalled, 29), 29000), null);
+    assert.match(layerGuard().observe(layerLogs(stalled, 30), 30000), /at most 1\.8 MB\/s/);
+    assert.equal(layerGuard({}, comfyImage(), { ...boundOptions, boundMin: 0 }).observe(layerLogs(stalled, 60), 60000), null);
+});
+
+test('pull-bound rule judges the last log fetch, not a later wall clock', () => {
+    const g = layerGuard();
+    g.logsAt = 20000;
+    assert.equal(g.observe(layerLogs(pullStart, 20), 300000), null, 'a stale feed must not dilute the bound');
+});
+
+test('an unknown layer or missing registry sizes disables the pull-bound rule', () => {
+    const unknown = [...pullStart, [1, 'deadbeef0000', 'Downloading']];
+    const g = layerGuard();
+    assert.equal(g.observe(layerLogs(unknown, 60), 60000), null);
+    assert.equal(g.pullBound, null);
+    for (const image of [null, undefined]) {
+        const off = layerGuard();
+        off.imageLayers = image; // failed or still loading
+        assert.equal(off.observe(layerLogs(pullStart, 60), 60000), null);
+    }
+});
+
+test('cached layers are excluded from the pull bound and the total', () => {
+    const cached = [...pullStart, [0, BIG, 'Already exists'], [1, SMALL, 'Downloading'], [1, MID, 'Downloading'], [1, L120, 'Waiting']];
+    assert.match(layerGuard().observe(layerLogs(cached, 40), 40000), /at most 20\.6 MB\/s .* 0\.05\/0\.95GB/);
+    const done = [...cached, [10, SMALL, 'Download complete'], [30, MID, 'Download complete'], [31, L120, 'Downloading'], [35, L120, 'Download complete']];
+    assert.equal(layerGuard().observe(layerLogs(done, 40), 40000), null, 'every non-cached layer is done');
+});
+
+test('host uplink below the minimum is slow until the container is up', () => {
+    assert.equal(layerGuard({ uplink: 500 }).observe({}, 1000), 'host uplink 500 Mbps (<1000)');
+    assert.equal(layerGuard({ uplink: 5832 }).observe({}, 1000), null);
+    assert.equal(layerGuard({ uplink: 500 }, comfyImage(), { ...boundOptions, minUplinkMbps: 0 }).observe({}, 1000), null);
+    const started = { system: guardedLogs([[1, 'Status: Image is up to date'], [2, 'start container begin']]) };
+    assert.equal(layerGuard({ uplink: 500 }).observe(started, 3000), null);
+});
+
+const GRAPHQL = 'https://api.runpod.io/graphql';
+const machineReply = (uplink, machineId = 'tqeq6ynqjp7b') => response({ data: { pod: { id: 'x', machineId, machine: {
+    gpuDisplayName: 'RTX 5090', location: 'RO', maxDownloadSpeedMbps: uplink, maxUploadSpeedMbps: 6224, diskMBps: 14801, dataCenterId: 'EU-RO-1', secureCloud: true } } } });
+
+test('GraphQL host metadata ignores errors and unassigned machines, then fills meta once', async () => {
+    const queries = [];
+    const replies = [response({ errors: [{ message: 'Something went wrong' }] }), response({ data: { pod: { id: 'pod-1', machineId: null, machine: null } } }), machineReply(5832)];
+    const { manager } = bootFixture({ kind: 'fast', readyAfter: 30, extra: async (url, options) => {
+        if (url !== GRAPHQL) return null;
+        assert.equal(options.method, 'POST');
+        assert.equal(options.headers.Authorization, 'Bearer test-key');
+        queries.push(JSON.parse(options.body).query);
+        return replies.shift();
+    } });
+    const logs = [];
+    manager.log = (...args) => logs.push(args.join(' '));
+    assert.equal(await manager.ensurePod(), 'pod-1');
+    assert.equal(queries.length, 3, 'stops querying once the machine is known');
+    assert.match(queries[0], /pod\(input:\{podId:"pod-1"\}\) \{ machineId machine \{ maxDownloadSpeedMbps diskMBps location dataCenterId \} \}/);
+    const boot = manager.state.boot;
+    assert.deepEqual([boot.machineId, boot.uplink, boot.diskMBps, boot.location, boot.dataCenter], ['tqeq6ynqjp7b', 5832, 14801, 'RO', 'region']);
+    assert.ok(logs.some(line => /pod ready: pod-1 .* machine=tqeq6ynqjp7b uplink=5832Mbps disk=14801MB\/s/.test(line)));
+    assert.ok(logs.some(line => /^\[?.*host pod-1: machine=tqeq6ynqjp7b uplink=5832Mbps/.test(line)));
+});
+
+test('GraphQL fills a missing datacenter from the machine', async () => {
+    const manager = new RunpodManager({ env: { RUNPOD_KEY: 'test-key' }, fetchImpl: async () => machineReply(5832) });
+    manager.log = () => {};
+    const guard = new BootGuard({ created: 0, dataCenter: null }, [], boundOptions);
+    await manager.updateMachine('pod-1', guard);
+    assert.equal(guard.meta.dataCenter, 'EU-RO-1');
+    assert.equal(guard.machineKnown, true);
+});
+
+test('a low-uplink host is replaced right away, creating before deleting', async () => {
+    const { manager, requests, count } = bootFixture({ extra: async (url, options) => {
+        if (url !== GRAPHQL) return null;
+        return JSON.parse(options.body).query.includes('"pod-1"') ? machineReply(500, 'slow-machine') : machineReply(5832);
+    } });
+    const logs = [];
+    manager.log = (...args) => logs.push(args.join(' '));
+    assert.equal(await manager.ensurePod(), 'pod-2');
+    assert.equal(count(), 2);
+    const creates = requests.map((r, i) => r.method === 'POST' && r.url.endsWith('/pods') ? i : -1).filter(i => i >= 0);
+    assert.ok(creates[1] < requests.findIndex(r => r.method === 'DELETE' && r.url.endsWith('/pod-1')));
+    const slow = logs.filter(line => line.includes('slow pod pod-1'));
+    assert.equal(slow.length, 1);
+    assert.match(slow[0], /slow pod pod-1: host uplink 500 Mbps \(<1000\);.*machine=slow-machine/);
+    assert.equal(requests.filter(r => r.url.endsWith('/pod/pod-1/logs')).length, 1, 'swapped at the first logs cadence, before any pull judgment');
+    assert.equal(manager.state.boot.uplink, 5832);
+    assert.equal(manager.state.boot.swaps, 1);
+});
+
+test('registry layer sizes drive a slow-pull replacement when logs carry no byte counts', async () => {
+    const registry = [];
+    const { manager, requests, count } = bootFixture({ kind: 'layers', extra: async (url, options) => {
+        if (!url.startsWith('https://auth.docker.io/') && !url.startsWith('https://registry-1.docker.io/')) return null;
+        registry.push({ url, headers: options.headers });
+        if (url === 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:permissionbrick/comfyui-runpod-worker:pull') return response({ token: 'anon' });
+        if (url === 'https://registry-1.docker.io/v2/permissionbrick/comfyui-runpod-worker/manifests/latest') return response(comfyManifest());
+        throw new Error(`unexpected registry URL ${url}`);
+    } });
+    const logs = [];
+    manager.log = (...args) => logs.push(args.join(' '));
+    assert.equal(await manager.ensurePod(), 'pod-2');
+    assert.equal(count(), 2);
+    assert.equal(registry.length, 2, 'manifest fetched once and cached for the replacement');
+    assert.equal(registry[1].headers.Authorization, 'Bearer anon');
+    for (const type of ['docker.distribution.manifest.v2', 'oci.image.manifest.v1', 'docker.distribution.manifest.list.v2', 'oci.image.index.v1']) {
+        assert.ok(registry[1].headers.Accept.includes(`application/vnd.${type}+json`));
+    }
+    const slow = logs.find(line => line.includes('slow pod pod-1'));
+    assert.match(slow, /image pull at most 37\.5 MB\/s \(<40\) after 80s/);
+    const creates = requests.map((r, i) => r.method === 'POST' && r.url.endsWith('/pods') ? i : -1).filter(i => i >= 0);
+    assert.ok(creates[1] < requests.findIndex(r => r.method === 'DELETE' && r.url.endsWith('/pod-1')));
+    assert.equal(manager.state.boot.swaps, 1);
 });

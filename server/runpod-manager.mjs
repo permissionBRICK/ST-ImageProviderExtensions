@@ -2,9 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import fetch from 'node-fetch';
 import { BootGuard } from './runpod-boot-guard.mjs';
+import { RegistryLayerCache } from './registry-layers.mjs';
 
 const UA = 'Mozilla/5.0 (compatible; st-image-generation-runpod)';
 const API = 'https://api.runpod.io/v2';
+// REST v2 does not expose the host machine. GraphQL still does, but RunPod
+// plans to retire GraphQL for integrators in early 2027; this is a stopgap and
+// every failure only disables the uplink check.
+const GRAPHQL = 'https://api.runpod.io/graphql';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // REST v2 creates one GPU type per request, so the pool is tried in this order and
 // only a no-capacity answer moves on. The slow A5000 comes last; the A4000 is left out.
@@ -44,7 +49,15 @@ export class RunpodManager {
             modelAfterMs: Number(env.RUNPOD_MODEL_JUDGE_AFTER_SECONDS ?? 45) * 1000,
             windowMs: Number(env.RUNPOD_DOWNLOAD_WINDOW_SECONDS ?? 30) * 1000,
             doneFraction: Number(env.RUNPOD_DOWNLOAD_DONE_FRACTION ?? 0.85),
+            boundMin: Number(env.RUNPOD_PULL_BOUND_MIN_MBS ?? 40),
+            boundAfterMs: Number(env.RUNPOD_PULL_BOUND_JUDGE_AFTER_SECONDS ?? 30) * 1000,
+            minUplinkMbps: Number(env.RUNPOD_MIN_UPLINK_MBPS ?? 1000),
         };
+        this.registryLayers = new RegistryLayerCache({
+            fetchImpl: (...args) => this.fetch(...args),
+            now: () => this.now(),
+            log: (...args) => this.log(...args),
+        });
         this.key = env.RUNPOD_KEY ?? '';
         this.idleMs = Number(env.RUNPOD_IDLE_SECONDS ?? 900) * 1000;
         this.keepaliveMs = Math.max(1000, Number(env.RUNPOD_KEEPALIVE_SECONDS ?? 60) * 1000);
@@ -52,7 +65,7 @@ export class RunpodManager {
         this.startTimeoutMs = Number(env.RUNPOD_START_TIMEOUT ?? 1500) * 1000;
         this.datacenters = csv(env.RUNPOD_DATACENTERS);
         this.cloudType = env.RUNPOD_CLOUD_TYPE ?? 'SECURE';
-        this.image = env.RUNPOD_IMAGE ?? 'ghcr.io/permissionbrick/comfyui-runpod-worker:latest';
+        this.image = env.RUNPOD_IMAGE ?? 'docker.io/permissionbrick/comfyui-runpod-worker:latest';
         const availableGpuTypes = csv(env.RUNPOD_GPU_AVAILABLE_TYPES, DEFAULT_AVAILABLE_GPU_TYPES.join(','));
         this.gpuProfiles = {
             a5000: { types: [env.RUNPOD_GPU_A5000_TYPE ?? 'NVIDIA RTX A5000'] },
@@ -231,7 +244,8 @@ export class RunpodManager {
         const gpu = pod.gpu?.id ?? gpuType;
         const meta = { created, gpu, dataCenter: pod.dataCenterId ?? null };
         this.pods.set(pod.id, meta);
-        this.log(`created pod ${pod.id} models=${podEnv.MODEL_KEY || 'legacy-all'} GPU=${gpu} cost=${pod.cost ?? '?'} per hour dataCenter=${meta.dataCenter ?? '?'}`);
+        // The host machine is usually assigned after create; the warm-up loop fills it in via GraphQL.
+        this.log(`created pod ${pod.id} models=${podEnv.MODEL_KEY || 'legacy-all'} GPU=${gpu} cost=${pod.cost ?? '?'} per hour dataCenter=${meta.dataCenter ?? '?'} machine=${meta.machineId ?? '?'} uplink=${meta.uplink ?? '?'}Mbps disk=${meta.diskMBps ?? '?'}MB/s`);
         return [pod.id, gpu];
     }
 
@@ -282,9 +296,45 @@ export class RunpodManager {
         return response.json();
     }
 
+    /** Host machine via GraphQL (stopgap until GraphQL is retired in early 2027). Returns null before assignment. */
+    async podMachine(podId) {
+        const response = await this.fetch(GRAPHQL, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json', 'User-Agent': UA },
+            body: JSON.stringify({ query: `{ pod(input:{podId:${JSON.stringify(podId)}}) { machineId machine { maxDownloadSpeedMbps diskMBps location dataCenterId } } }` }),
+            signal: AbortSignal.timeout(10000),
+        });
+        if (!response.ok) throw new Error(`GraphQL returned ${response.status}`);
+        const body = await response.json();
+        if (body?.errors?.length) throw new Error(`GraphQL error: ${JSON.stringify(body.errors).slice(0, 200)}`);
+        const pod = body?.data?.pod;
+        return pod?.machine ? pod : null;
+    }
+
+    async updateMachine(podId, guard) {
+        let pod;
+        try { pod = await this.podMachine(podId); } catch { return; } // retried at the next logs cadence
+        if (!pod) return;
+        const positive = value => Number(value) > 0 ? Number(value) : null;
+        const m = guard.meta;
+        Object.assign(m, {
+            machineId: pod.machineId ?? null,
+            uplink: positive(pod.machine.maxDownloadSpeedMbps),
+            diskMBps: positive(pod.machine.diskMBps),
+            location: pod.machine.location ?? null,
+        });
+        m.dataCenter ??= pod.machine.dataCenterId ?? null;
+        guard.machineKnown = true;
+        this.log(`host ${podId}: machine=${m.machineId ?? '?'} uplink=${m.uplink ?? '?'}Mbps disk=${m.diskMBps ?? '?'}MB/s location=${m.location ?? '?'} dataCenter=${m.dataCenter ?? '?'}`);
+    }
+
     bootGuard(podId, files) {
         const meta = this.pods.get(podId);
-        return meta ? new BootGuard(meta, files, this.bootOptions) : null;
+        if (!meta) return null;
+        const guard = new BootGuard(meta, files, this.bootOptions);
+        // Starts the manifest fetch in the background; later cadences pick up the result.
+        guard.imageLayers = this.registryLayers.lookup(this.image);
+        return guard;
     }
 
     async replaceSlowPod(podId, values, epoch) {
@@ -427,7 +477,12 @@ export class RunpodManager {
                     }
                     if (this.now() >= guard.nextLogsAt) {
                         guard.nextLogsAt = this.now() + 10000;
-                        try { guard.logs = await this.podLogs(podId); } catch { /* telemetry is optional */ }
+                        try {
+                            guard.logs = await this.podLogs(podId);
+                            guard.logsAt = this.now();
+                        } catch { /* telemetry is optional */ }
+                        guard.imageLayers = this.registryLayers.lookup(this.image);
+                        if (!guard.machineKnown) await this.updateMachine(podId, guard);
                         if (guard.meta.dataCenter == null) {
                             try {
                                 guard.meta.dataCenter = (await this.api('GET', `/pods/${podId}`)).dataCenterId ?? null;
@@ -494,7 +549,7 @@ export class RunpodManager {
                         void this.prefetchRest(podId);
                     }
                     this.state.boot = guard ? { ...guard.meta, containerSeconds: guard.containerSeconds, pullMBps: guard.pullRate,
-                        modelMBps: guard.modelRate, readySeconds: (this.now() - guard.meta.created) / 1000, swaps } : null;
+                        pullLowerMBps: guard.pullLower, pullBoundMBps: guard.pullBound, modelMBps: guard.modelRate, readySeconds: (this.now() - guard.meta.created) / 1000, swaps } : null;
                     this.log(`pod ready: ${podId}${guard ? ` after ${this.state.boot.readySeconds.toFixed(1)}s; ${guard.describe()}; swaps=${swaps}` : ''}`);
                     return podId;
                 }

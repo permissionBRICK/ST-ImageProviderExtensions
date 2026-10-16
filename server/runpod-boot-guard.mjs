@@ -1,6 +1,11 @@
 // Download counters come from Docker and boot-models' received-chunk logs.
 // File sizes and the worker's static /status percentages are not progress.
 const units = { '': 1, k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12 };
+// RunPod's system log currently shows per-layer pull states without byte
+// counts. With compressed layer sizes from the registry manifest, the states
+// still bound how many bytes can have arrived.
+const LAYER_STATE = /\b([0-9a-f]{12}):?\s+(Pulling fs layer|Waiting|Downloading|Verifying Checksum|Download complete|Extracting|Pull complete|Already exists)\b/;
+const LAYER_DONE = new Set(['Verifying Checksum', 'Download complete', 'Extracting', 'Pull complete']);
 
 function lines(entries, since) {
     return (entries ?? []).flatMap(line => {
@@ -26,6 +31,43 @@ function rate(series, after, window) {
     return (bytes - baseline) / window / 1000; // milliseconds -> decimal MB/s
 }
 
+function layerProgress(events, image) {
+    const layers = new Map();
+    let t0 = null;
+    for (const { time, id, state } of events) {
+        const layer = layers.get(id) ?? { started: null, done: null, cached: false };
+        layers.set(id, layer);
+        if (state === 'Already exists') layer.cached = true;
+        else if (state === 'Downloading') { layer.started ??= time; t0 ??= time; }
+        else if (LAYER_DONE.has(state)) layer.done ??= time;
+    }
+    if (!image?.layers || t0 === null) return null;
+    let done = 0;
+    let inFlight = 0;
+    let lastDone = null;
+    for (const [id, layer] of layers) {
+        // Queued layers (Pulling fs layer / Waiting) have received nothing yet.
+        if (layer.cached || (layer.started === null && layer.done === null)) continue;
+        const size = image.layers.get(id);
+        if (size === undefined) return { unknown: id };
+        if (layer.done !== null) {
+            done += size;
+            lastDone = Math.max(lastDone ?? layer.done, layer.done);
+        } else inFlight += size;
+    }
+    const needed = [...image.layers.keys()].filter(id => !layers.get(id)?.cached);
+    return {
+        t0,
+        done,
+        bound: done + inFlight,
+        total: needed.reduce((sum, id) => sum + image.layers.get(id), 0),
+        allDone: needed.every(id => layers.get(id)?.done != null),
+        lower: lastDone > t0 ? done / (lastDone - t0) / 1000 : null,
+    };
+}
+
+const known = value => value ?? '?';
+
 export class BootGuard {
     constructor(meta, files, options) {
         this.meta = meta;
@@ -34,6 +76,11 @@ export class BootGuard {
         this.containerSeconds = null;
         this.pullRate = null;
         this.modelRate = null;
+        this.pullLower = null;
+        this.pullBound = null;
+        // Set by the manager: registry layer sizes and the time of the last log fetch.
+        this.imageLayers = undefined;
+        this.logsAt = null;
         this.quiet = false;
         this.nextLogsAt = 0;
         this.nextReportAt = 0;
@@ -41,7 +88,9 @@ export class BootGuard {
 
     describe() {
         const m = this.meta;
-        return `GPU=${m.gpu ?? '?'} dataCenter=${m.dataCenter ?? '?'} container=${this.containerSeconds ?? '?'}s pull=${this.pullRate?.toFixed(1) ?? '?'}MB/s models=${this.modelRate?.toFixed(1) ?? '?'}MB/s`;
+        const pull = this.pullRate !== null ? `=${this.pullRate.toFixed(1)}` : this.pullLower !== null ? `>=${this.pullLower.toFixed(1)}` : '=?';
+        return `GPU=${known(m.gpu)} dataCenter=${known(m.dataCenter)} machine=${known(m.machineId)} uplink=${known(m.uplink)}Mbps disk=${known(m.diskMBps)}MB/s `
+            + `container=${known(this.containerSeconds)}s pull${pull}MB/s models=${this.modelRate?.toFixed(1) ?? '?'}MB/s`;
     }
 
     observe(logs, now, up = false) {
@@ -51,10 +100,13 @@ export class BootGuard {
         const container = lines(logs?.container, this.meta.created - 60000);
         const layers = new Map();
         const pull = [];
+        const layerEvents = [];
         let lastIncrease = 0;
         let pulled = false;
         let started = null;
         for (const { time, text } of system) {
+            const state = text.match(LAYER_STATE);
+            if (state) layerEvents.push({ time, id: state[1], state: state[2] });
             const progress = text.match(/\b([0-9a-f]{12})\b.*?Downloading\D*?([\d.]+)\s*([kKMGT]?)i?B\s*\/\s*([\d.]+)\s*([kKMGT]?)i?B/);
             const done = text.match(/\b([0-9a-f]{12})\b.*?(Download complete|Verifying Checksum|Extracting|Pull complete)/);
             if (progress) {
@@ -82,6 +134,10 @@ export class BootGuard {
         // Flat extraction/Pull complete samples must not dilute download speed.
         this.pullRate = rate(pull.slice(0, lastIncrease + 1), 0, Number.MAX_SAFE_INTEGER);
         const pullRate = rate(pull, o.pullAfterMs, o.windowMs);
+        const uplink = this.meta.uplink;
+        if (!this.quiet && this.containerSeconds === null && o.minUplinkMbps > 0 && uplink > 0 && uplink < o.minUplinkMbps) {
+            return `host uplink ${uplink} Mbps (<${o.minUplinkMbps})`;
+        }
         if (!this.quiet && this.containerSeconds === null && !pulled && pullRate !== null) {
             const total = [...layers.values()].reduce((sum, layer) => sum + layer.total, 0);
             const bytes = pull.at(-1)[1];
@@ -89,6 +145,16 @@ export class BootGuard {
             if (now - pull.at(-1)[0] <= o.windowMs && bytes < o.doneFraction * total && pullRate < o.pullMin) {
                 return `image pull ${pullRate.toFixed(1)} MB/s (<${o.pullMin}) after ${((pull.at(-1)[0] - pull[0][0]) / 1000).toFixed(0)}s, ${(bytes / 1e9).toFixed(2)}/${(total / 1e9).toFixed(2)}GB`;
             }
+        }
+        // Bytes received <= done layers + layers currently downloading. Judge
+        // at the last log fetch so a stale feed cannot under-count progress.
+        const layered = layerProgress(layerEvents, this.imageLayers);
+        const at = this.logsAt ?? now;
+        this.pullLower = layered?.lower ?? null;
+        this.pullBound = layered && !layered.unknown && at > layered.t0 ? layered.bound / (at - layered.t0) / 1000 : null;
+        if (!this.quiet && o.boundMin > 0 && this.containerSeconds === null && !pulled && this.pullBound !== null
+            && !layered.allDone && at - layered.t0 >= o.boundAfterMs && this.pullBound < o.boundMin) {
+            return `image pull at most ${this.pullBound.toFixed(1)} MB/s (<${o.boundMin}) after ${((at - layered.t0) / 1000).toFixed(0)}s, ${(layered.done / 1e9).toFixed(2)}/${(layered.total / 1e9).toFixed(2)}GB layers done`;
         }
         if (!this.quiet && this.containerSeconds === null && now - this.meta.created > o.containerDeadlineMs) {
             return `container not up after ${((now - this.meta.created) / 1000).toFixed(0)}s (deadline ${o.containerDeadlineMs / 1000}s)`;
