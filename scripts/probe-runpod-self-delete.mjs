@@ -77,7 +77,7 @@ async function main() {
         const pod = await api('POST', '/pods', {
             name: `pod-${keyMode}-key-delete-proof-${Date.now()}`,
             image,
-            gpu: { id: 'NVIDIA A40', count: 1, allowedCudaVersions: ['13.0'] },
+            gpu: { id: 'NVIDIA A40', count: 1, minCudaVersion: '13.0' },
             cloud: 'SECURE', disk: 50, ports: ['8189/http'],
             env: podEnv,
             cmd: ['python3', '-c', python],

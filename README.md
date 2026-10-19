@@ -64,7 +64,8 @@ Set the following environment variables on the SillyTavern server/container, the
 | `RUNPOD_GPU_4090_TYPE` | `NVIDIA GeForce RTX 4090` | RunPod GPU ID behind the exact-card **RTX 4090** profile. |
 | `RUNPOD_GPU_5090_TYPE` | `NVIDIA GeForce RTX 5090` | RunPod GPU ID behind the **RTX 5090 — Fast** profile. |
 | `RUNPOD_GPU_AVAILABLE_TYPES` | RTX 4090, A40, RTX 5090, RTX A5000 | Comma-separated GPU pool behind the default **Available — Broad GPU pool** profile. Types are tried in order; the next type is requested only when RunPod has no capacity for the current one. |
-| `RUNPOD_CUDA_VERSIONS` | `13.0` | Comma-separated allowed CUDA versions. |
+| `RUNPOD_MIN_CUDA_VERSION` | `13.0` | Lowest host CUDA version, matching the worker image. Hosts with newer drivers are accepted. |
+| `RUNPOD_CUDA_VERSIONS` | empty | Optional comma-separated exact CUDA versions. When set, it replaces `RUNPOD_MIN_CUDA_VERSION`; RunPod matches the list exactly, so newer versions are excluded unless listed. |
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | RunPod cloud type. |
 | `RUNPOD_DATACENTERS` | empty | Optional comma-separated datacenter restriction. |
 | `RUNPOD_START_TIMEOUT` | `1500` | Seconds allowed for Pod boot and model preparation. |

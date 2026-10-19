@@ -64,7 +64,7 @@ async function create(candidate) {
                 const pod = await api('POST', '/pods', {
                     name: `krea2-bench-${candidate.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Date.now()}`,
                     image: IMAGE,
-                    gpu: { id: candidate.id, count: 1, allowedCudaVersions: ['13.0'] },
+                    gpu: { id: candidate.id, count: 1, minCudaVersion: '13.0' },
                     cloud: cloudType,
                     disk: 80,
                     ports: ['8188/http', '8189/http'],

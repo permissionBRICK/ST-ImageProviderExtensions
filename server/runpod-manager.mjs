@@ -73,7 +73,11 @@ export class RunpodManager {
             rtx5090: { types: [env.RUNPOD_GPU_5090_TYPE ?? 'NVIDIA GeForce RTX 5090'] },
             available: { types: availableGpuTypes.length ? availableGpuTypes : [...DEFAULT_AVAILABLE_GPU_TYPES] },
         };
-        this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS, '13.0');
+        // The worker image needs a host driver for CUDA 13.0 or newer. RunPod matches
+        // allowedCudaVersions exactly, so an exact list also drops newer-driver hosts;
+        // it is only sent when RUNPOD_CUDA_VERSIONS asks for one (RunPod rejects both).
+        this.cudaVersions = csv(env.RUNPOD_CUDA_VERSIONS);
+        this.minCudaVersion = this.cudaVersions.length ? '' : (env.RUNPOD_MIN_CUDA_VERSION ?? '13.0');
         this.podName = env.RUNPOD_POD_NAME ?? 'comfyui-lazy';
         this.comfyArgs = env.RUNPOD_COMFY_ARGS ?? '--listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention';
         this.selfReapSeconds = Number(env.RUNPOD_SELF_REAP_SECONDS ?? 1200);
@@ -239,6 +243,7 @@ export class RunpodManager {
         };
         if (datacenters?.length) body.dataCenterIds = datacenters;
         if (this.cudaVersions.length) body.gpu.allowedCudaVersions = this.cudaVersions;
+        else if (this.minCudaVersion) body.gpu.minCudaVersion = this.minCudaVersion;
         const created = this.now();
         const pod = await this.api('POST', '/pods', body);
         const gpu = pod.gpu?.id ?? gpuType;

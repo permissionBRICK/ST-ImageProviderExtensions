@@ -106,7 +106,7 @@ test('managed Pod creation passes the management key only as the self-reaper cre
     assert.equal(body.env.RUNPOD_TERMINATE_API_KEY, 'account-secret');
     assert.equal(body.env.RUNPOD_KEY, undefined);
     assert.equal(body.env.RUNPOD_API_KEY, undefined, 'RunPod injects the pod-scoped key itself');
-    assert.deepEqual(body.gpu, { id: 'NVIDIA RTX A5000', count: 1, allowedCudaVersions: ['13.0'] });
+    assert.deepEqual(body.gpu, { id: 'NVIDIA RTX A5000', count: 1, minCudaVersion: '13.0' });
     assert.equal(body.name, 'comfyui-lazy');
     assert.equal(body.image, 'docker.io/permissionbrick/comfyui-runpod-worker:latest');
     assert.equal(body.cloud, 'SECURE');
@@ -490,7 +490,22 @@ test('no-capacity moves to the next GPU type and preserves CUDA and datacenter o
     const strip = ({ gpu: { id, ...gpu }, env: { REQUESTED_GPU_TYPE, ...env }, ...rest }) => ({ ...rest, gpu, env });
     for (const body of bodies.slice(1)) assert.deepEqual(strip(body), strip(bodies[0]));
     assert.deepEqual(bodies[0].dataCenterIds, ['region']);
-    assert.deepEqual(bodies[0].gpu.allowedCudaVersions, ['13.0']);
+    assert.equal(bodies[0].gpu.minCudaVersion, '13.0');
+});
+
+test('an exact CUDA list replaces the CUDA floor', async () => {
+    const bodies = [];
+    const manager = new RunpodManager({
+        env: { RUNPOD_KEY: 'test-key', RUNPOD_CUDA_VERSIONS: '13.0, 13.2' },
+        fetchImpl: async (url, options) => {
+            bodies.push(JSON.parse(options.body));
+            return response({ id: 'pod-1', gpu: { id: 'NVIDIA GeForce RTX 4090', count: 1 } });
+        },
+    });
+    manager.log = () => {};
+    await manager.createPod([]);
+    assert.deepEqual(bodies[0].gpu.allowedCudaVersions, ['13.0', '13.2']);
+    assert.equal(bodies[0].gpu.minCudaVersion, undefined, 'RunPod rejects allowedCudaVersions together with minCudaVersion');
 });
 
 test('no-capacity is recognised from the RFC 9457 400 body', async () => {
