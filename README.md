@@ -141,6 +141,13 @@ For manual setup, copy the example JSON into `<user-data>/user/workflows/`, choo
 
 Choose **Prompt generation connection profile** to use another LLM for the text-to-image prompt step. The extension still uses SillyTavern's chat-aware generation pipeline and full context. It temporarily activates the selected profile, waits for it to connect, generates the prompt, and restores the prior profile. Leave the selector empty to use the active chat model.
 
+**Image prompt request sent as** controls where that request goes in the LLM prompt:
+
+- **Instruction (quiet prompt)**, the default, uses SillyTavern's quiet prompt. It is the last message of the request, after the post-history instructions, with the system role (the system sequence in instruct mode).
+- **System message** and **User message** insert the request after the latest chat message (depth 0) with that role, before the post-history instructions.
+
+In all three, the chat history before the request is identical to a normal reply, so provider prompt caches stay usable. The exception is providers that move every system message to the start of the prompt, such as Gemini through OpenRouter. There, the system-role options change the start of the prompt and the cached history is lost. Use **User message** for those models, or set the connection profile's Prompt Post-Processing to **Semi-strict**, which sends every system message after the first as a user message.
+
 ## Compatibility and development
 
 Requires SillyTavern 1.18.0+. This repository derives from SillyTavern's AGPL-licensed Image Generation extension and retains its provider support. Provider API keys remain in SillyTavern's server-side secrets store; browser settings and fallback presets contain configuration, not secrets.

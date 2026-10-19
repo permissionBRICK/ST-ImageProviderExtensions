@@ -14,9 +14,10 @@ for (const marker of ['runpodControl', 'resolveReferenceImageForGeneration', 're
 for (const marker of ['COMFY_DEFAULT_SAMPLERS', 'COMFY_DEFAULT_SCHEDULERS', 'getColdRunpodOptions']) {
     assert.ok(source.includes(marker), `missing cold RunPod option fallback: ${marker}`);
 }
-for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_text_encoder', 'sd_custom_entry_add', 'sd_prompt_generation_profile']) {
+for (const marker of ['sd_runpod_warmup', 'sd_ref_images_list', 'sd_lora_strength', 'sd_text_encoder', 'sd_custom_entry_add', 'sd_prompt_generation_profile', 'sd_prompt_generation_role']) {
     assert.ok(settings.includes(marker), `missing custom image setting: ${marker}`);
 }
+assert.equal(source.match(/generateQuietPrompt\(/g).length, 2, 'image-prompt requests must go through generateImagePromptReply so they honor the role setting');
 assert.ok(source.includes("third-party/ST-ImageProviderExtensions/comfyWorkflowEditor.html"));
 assert.ok(source.includes("renderExtensionTemplateAsync('third-party/ST-ImageProviderExtensions'"));
 assert.ok(!source.includes("renderExtensionTemplateAsync('stable-diffusion'"));

@@ -42,6 +42,13 @@
             <label for="sd_prompt_generation_profile" data-i18n="Prompt generation connection profile">Prompt generation connection profile</label>
             <select id="sd_prompt_generation_profile" class="text_pole"></select>
             <small data-i18n="sd_prompt_generation_profile_small">Connection profile always used to generate image-prompt text with full chat context, then the previous profile is restored. Leave empty to use the active chat model.</small>
+            <label for="sd_prompt_generation_role" data-i18n="Image prompt request sent as">Image prompt request sent as</label>
+            <select id="sd_prompt_generation_role" class="text_pole">
+                <option value="instruction" data-i18n="sd_prompt_generation_role_instruction">Instruction (quiet prompt)</option>
+                <option value="system" data-i18n="sd_prompt_generation_role_system">System message</option>
+                <option value="user" data-i18n="sd_prompt_generation_role_user">User message</option>
+            </select>
+            <small data-i18n="sd_prompt_generation_role_small">Instruction is SillyTavern's quiet prompt: the last message of the request, with the system role, after the post-history instructions. System message and User message insert the request after the latest chat message with that role. Providers that move every system message to the start of the prompt (such as Gemini through OpenRouter) cannot reuse the cached chat history for the system options; use User message, or Semi-strict prompt post-processing on that connection profile.</small>
             <hr>
             <h4 data-i18n="Provider Fallback Chain">Provider Fallback Chain</h4>
             <small data-i18n="sd_settings_presets_small">Save the current backend/connection settings (source, model, sampler, dimensions, etc.) as named presets and arrange them into an ordered chain. Prompt templates, styles, custom entries, and the reference image library are not included.</small>

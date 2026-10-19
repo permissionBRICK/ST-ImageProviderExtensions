@@ -4,6 +4,8 @@ import {
     appendMediaToMessage,
     event_types,
     eventSource,
+    extension_prompt_roles,
+    extension_prompt_types,
     formatCharacterAvatar,
     generateQuietPrompt,
     getCharacterAvatar,
@@ -12,6 +14,7 @@ import {
     getUserAvatar,
     online_status,
     saveSettingsDebounced,
+    setExtensionPrompt,
     substituteParams,
     substituteParamsExtended,
     systemUserName,
@@ -73,6 +76,8 @@ const MODULE_NAME = 'sd';
 const LEGACY_IMAGE_PROMPT_PROFILE_MODULE = 'ST-ImagePromptProfiles';
 const COMFY_METADATA_API = '/api/plugins/image-provider-extensions/comfy';
 const RUNPOD_API = '/api/plugins/image-provider-extensions/runpod';
+// Extension prompt that carries the image-prompt request for the system/user roles
+const IMAGE_PROMPT_INJECT_ID = 'sd_image_prompt_request';
 // Shared event names used by Token Saver and Summarize Profiles. Keeping these
 // local makes the extension work on an unmodified SillyTavern client.
 const TEMPORARY_CONNECTION_STARTED = 'st-token-saver:temporary-connection-started';
@@ -406,6 +411,9 @@ const defaultSettings = {
 
     // Dedicated LLM connection profile for image-prompt generation ('' = use active model)
     prompt_generation_profile: '',
+    // How the image-prompt request reaches the LLM: 'instruction' (SillyTavern's quiet prompt)
+    // or a depth-0 chat injection with the 'system' or 'user' role
+    prompt_generation_role: 'instruction',
 
     // User-defined custom wand dropdown entries ({ id, title, prompt })
     custom_entries: [],
@@ -429,6 +437,7 @@ const PRESET_EXCLUDE_KEYS = [
     // The image-prompt LLM profile is independent of the image backend, so it must
     // never be captured/swapped by image-generation presets or fallback retries.
     'prompt_generation_profile',
+    'prompt_generation_role',
     'prompts',
     'character_prompts',
     'character_negative_prompts',
@@ -859,6 +868,7 @@ async function loadSettings() {
     $('#sd_comfy_runpod_url').val(extension_settings.sd.comfy_runpod_url);
     $('#sd_snap').prop('checked', extension_settings.sd.snap);
     $('#sd_minimal_prompt_processing').prop('checked', extension_settings.sd.minimal_prompt_processing);
+    $('#sd_prompt_generation_role').val(extension_settings.sd.prompt_generation_role);
     $('#sd_clip_skip').val(extension_settings.sd.clip_skip);
     $('#sd_clip_skip_value').val(extension_settings.sd.clip_skip);
     $('#sd_seed').val(extension_settings.sd.seed);
@@ -1079,6 +1089,11 @@ function onSnapInput() {
 
 function onMinimalPromptProcessing() {
     extension_settings.sd.minimal_prompt_processing = !!$(this).prop('checked');
+    saveSettingsDebounced();
+}
+
+function onPromptGenerationRoleChange() {
+    extension_settings.sd.prompt_generation_role = String($(this).val());
     saveSettingsDebounced();
 }
 
@@ -1569,10 +1584,7 @@ async function selectReferenceImageWithLlm(prompt, candidates) {
         '',
         'Reply with ONLY the tag of the chosen reference image and nothing else.',
     ].join('\n');
-    const profileId = extension_settings.sd.prompt_generation_profile;
-    const reply = profileId
-        ? await withConnectionProfile(profileId, () => generateQuietPrompt({ quietPrompt }))
-        : await generateQuietPrompt({ quietPrompt });
+    const reply = await generateImagePromptReply(quietPrompt);
     return matchReferenceTag(String(reply ?? '').trim(), candidates);
 }
 
@@ -4777,7 +4789,6 @@ function getUserAvatarUrl() {
  */
 async function generatePrompt(quietPrompt) {
     const toast = toastr.info('Generating image prompt with an LLM...', 'Image Generation');
-    const profileId = extension_settings.sd.prompt_generation_profile;
     let reply;
 
     // When the workflow uses a reference image and there is more than one to choose
@@ -4792,9 +4803,7 @@ async function generatePrompt(quietPrompt) {
         : quietPrompt;
 
     try {
-        reply = profileId
-            ? await withConnectionProfile(profileId, () => generateQuietPrompt({ quietPrompt: effectiveQuietPrompt }))
-            : await generateQuietPrompt({ quietPrompt: effectiveQuietPrompt });
+        reply = await generateImagePromptReply(effectiveQuietPrompt);
     } finally {
         toastr.clear(toast);
     }
@@ -4815,6 +4824,34 @@ async function generatePrompt(quietPrompt) {
     }
 
     return processedReply;
+}
+
+/**
+ * Sends an image-prompt request to the LLM with full chat context, through the
+ * prompt-generation connection profile when one is set. 'instruction' uses
+ * SillyTavern's quiet prompt (last in the request, system role); 'system' and
+ * 'user' inject the request after the latest chat message with that role.
+ * @param {string} quietPrompt Request for the LLM.
+ * @returns {Promise<string>} Raw LLM reply.
+ */
+async function generateImagePromptReply(quietPrompt) {
+    const role = {
+        system: extension_prompt_roles.SYSTEM,
+        user: extension_prompt_roles.USER,
+    }[extension_settings.sd.prompt_generation_role];
+    const generate = async () => {
+        if (role === undefined) {
+            return await generateQuietPrompt({ quietPrompt });
+        }
+        setExtensionPrompt(IMAGE_PROMPT_INJECT_ID, quietPrompt, extension_prompt_types.IN_CHAT, 0, false, role);
+        try {
+            return await generateQuietPrompt({ quietPrompt: '' });
+        } finally {
+            setExtensionPrompt(IMAGE_PROMPT_INJECT_ID, '', extension_prompt_types.IN_CHAT, 0);
+        }
+    };
+    const profileId = extension_settings.sd.prompt_generation_profile;
+    return profileId ? await withConnectionProfile(profileId, generate) : await generate();
 }
 
 /**
@@ -7707,6 +7744,7 @@ export async function init() {
     $('#sd_multimodal_captioning').on('input', onMultimodalCaptioningInput);
     $('#sd_snap').on('input', onSnapInput);
     $('#sd_minimal_prompt_processing').on('input', onMinimalPromptProcessing);
+    $('#sd_prompt_generation_role').on('change', onPromptGenerationRoleChange);
     $('#sd_clip_skip').on('input', onClipSkipInput);
     $('#sd_seed').on('input', onSeedInput);
     $('#sd_character_prompt_share').on('input', onCharacterPromptShareInput);
