@@ -41,7 +41,7 @@
             </label>
             <label for="sd_prompt_generation_profile" data-i18n="Prompt generation connection profile">Prompt generation connection profile</label>
             <select id="sd_prompt_generation_profile" class="text_pole"></select>
-            <small data-i18n="sd_prompt_generation_profile_small">Connection profile always used to generate image-prompt text with full chat context, then the previous profile is restored. Leave empty to use the active chat model.</small>
+            <small data-i18n="sd_prompt_generation_profile_small">Connection profile always used to generate image-prompt text with chat context, then the previous profile is restored. Leave empty to use the active chat model.</small>
             <label for="sd_prompt_generation_role" data-i18n="Image prompt request sent as">Image prompt request sent as</label>
             <select id="sd_prompt_generation_role" class="text_pole">
                 <option value="instruction" data-i18n="sd_prompt_generation_role_instruction">Instruction (quiet prompt)</option>
@@ -49,6 +49,9 @@
                 <option value="user" data-i18n="sd_prompt_generation_role_user">User message</option>
             </select>
             <small data-i18n="sd_prompt_generation_role_small">Instruction is SillyTavern's quiet prompt: the last message of the request, with the system role, after the post-history instructions. System message and User message insert the request after the latest chat message with that role. Providers that move every system message to the start of the prompt (such as Gemini through OpenRouter) cannot reuse the cached chat history for the system options; use User message, or Semi-strict prompt post-processing on that connection profile.</small>
+            <label for="sd_prompt_generation_history" data-i18n="Chat messages for another model">Chat messages for another model</label>
+            <input id="sd_prompt_generation_history" type="number" class="text_pole" min="0" step="1" />
+            <small data-i18n="sd_prompt_generation_history_small">When the prompt generation profile can't reuse the chat's prompt cache (another model, preset or endpoint), the image-prompt request carries only the latest chat messages: this many up to twice as many minus one. The cut moves forward this many messages at a time, so the requests in between reuse the image model's cache. The character card, summary and world info stay. With the chat's own model, the request carries the whole chat to reuse the chat's cache. 0 always sends the whole chat.</small>
             <hr>
             <h4 data-i18n="Provider Fallback Chain">Provider Fallback Chain</h4>
             <small data-i18n="sd_settings_presets_small">Save the current backend/connection settings (source, model, sampler, dimensions, etc.) as named presets and arrange them into an ordered chain. Prompt templates, styles, custom entries, and the reference image library are not included.</small>

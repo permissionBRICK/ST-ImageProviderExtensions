@@ -69,6 +69,7 @@ import { power_user } from '/scripts/power-user.js';
 import { MacrosParser } from '/scripts/macros.js';
 import { ActionLoaderHandle, loader } from '/scripts/action-loader.js';
 import { COMFY_DEFAULT_SAMPLERS, COMFY_DEFAULT_SCHEDULERS, getColdRunpodOptions } from './comfy-defaults.js';
+import { historyStart, sharesChatPromptCache } from './prompt-history.js';
 
 export { MODULE_NAME };
 
@@ -414,6 +415,9 @@ const defaultSettings = {
     // How the image-prompt request reaches the LLM: 'instruction' (SillyTavern's quiet prompt)
     // or a depth-0 chat injection with the 'system' or 'user' role
     prompt_generation_role: 'instruction',
+    // Chat messages in the image-prompt request when its profile can't reuse the chat's prompt
+    // cache: this many to twice as many minus one (0 = whole chat)
+    prompt_generation_history: 10,
 
     // User-defined custom wand dropdown entries ({ id, title, prompt })
     custom_entries: [],
@@ -438,6 +442,7 @@ const PRESET_EXCLUDE_KEYS = [
     // never be captured/swapped by image-generation presets or fallback retries.
     'prompt_generation_profile',
     'prompt_generation_role',
+    'prompt_generation_history',
     'prompts',
     'character_prompts',
     'character_negative_prompts',
@@ -576,6 +581,7 @@ const isVideo = (/** @type {string} */ format) => VIDEO_EXTENSIONS.includes(Stri
  */
 function processTriggers(chat, _, abort, type) {
     if (type === 'quiet') {
+        trimImagePromptHistory(chat);
         return;
     }
 
@@ -637,6 +643,23 @@ function processTriggers(chat, _, abort, type) {
 
 globalThis.SD_ProcessTriggers = processTriggers;
 
+/**
+ * Cuts the chat history of the image-prompt request in flight down to its recent messages.
+ * Everything outside the history (system prompt, character card, persona, summary, world
+ * info) stays.
+ * @param {any[]} chat Chat messages the prompt is built from, changed in place.
+ */
+function trimImagePromptHistory(chat) {
+    if (!imagePromptHistory) {
+        return;
+    }
+    const start = historyStart(chat.length, imagePromptHistory);
+    if (start > 0) {
+        chat.splice(0, start);
+        console.debug(`SD: the image prompt carries the last ${chat.length} chat messages`);
+    }
+}
+
 function getSdRequestBody() {
     switch (extension_settings.sd.source) {
         case sources.vlad:
@@ -663,6 +686,8 @@ function toggleSourceControls() {
 
 let promptGenerationProfileDropdownInitialized = false;
 let promptProfileWarnedNoBaseProfile = false;
+// Fewest chat messages the image-prompt request in flight keeps (null: the whole chat)
+let imagePromptHistory = null;
 
 /** Populates the integrated image-prompt Connection Manager profile selector once. */
 function initPromptGenerationProfileDropdown() {
@@ -869,6 +894,7 @@ async function loadSettings() {
     $('#sd_snap').prop('checked', extension_settings.sd.snap);
     $('#sd_minimal_prompt_processing').prop('checked', extension_settings.sd.minimal_prompt_processing);
     $('#sd_prompt_generation_role').val(extension_settings.sd.prompt_generation_role);
+    $('#sd_prompt_generation_history').val(extension_settings.sd.prompt_generation_history);
     $('#sd_clip_skip').val(extension_settings.sd.clip_skip);
     $('#sd_clip_skip_value').val(extension_settings.sd.clip_skip);
     $('#sd_seed').val(extension_settings.sd.seed);
@@ -1094,6 +1120,11 @@ function onMinimalPromptProcessing() {
 
 function onPromptGenerationRoleChange() {
     extension_settings.sd.prompt_generation_role = String($(this).val());
+    saveSettingsDebounced();
+}
+
+function onPromptGenerationHistoryInput() {
+    extension_settings.sd.prompt_generation_history = Math.max(0, Math.floor(Number($(this).val())) || 0);
     saveSettingsDebounced();
 }
 
@@ -4827,10 +4858,12 @@ async function generatePrompt(quietPrompt) {
 }
 
 /**
- * Sends an image-prompt request to the LLM with full chat context, through the
+ * Sends an image-prompt request to the LLM with chat context, through the
  * prompt-generation connection profile when one is set. 'instruction' uses
  * SillyTavern's quiet prompt (last in the request, system role); 'system' and
  * 'user' inject the request after the latest chat message with that role.
+ * When the profile can reuse the chat's prompt cache, the request carries the
+ * whole chat, like a reply; otherwise only the recent messages.
  * @param {string} quietPrompt Request for the LLM.
  * @returns {Promise<string>} Raw LLM reply.
  */
@@ -4851,7 +4884,19 @@ async function generateImagePromptReply(quietPrompt) {
         }
     };
     const profileId = extension_settings.sd.prompt_generation_profile;
-    return profileId ? await withConnectionProfile(profileId, generate) : await generate();
+    const connectionManager = extension_settings.connectionManager;
+    const history = sharesChatPromptCache(profileId, connectionManager?.selectedProfile, connectionManager?.profiles)
+        ? 0
+        : Number(extension_settings.sd.prompt_generation_history) || 0;
+    const generateWithHistory = async () => {
+        imagePromptHistory = history > 0 ? history : null;
+        try {
+            return await generate();
+        } finally {
+            imagePromptHistory = null;
+        }
+    };
+    return profileId ? await withConnectionProfile(profileId, generateWithHistory) : await generateWithHistory();
 }
 
 /**
@@ -7745,6 +7790,7 @@ export async function init() {
     $('#sd_snap').on('input', onSnapInput);
     $('#sd_minimal_prompt_processing').on('input', onMinimalPromptProcessing);
     $('#sd_prompt_generation_role').on('change', onPromptGenerationRoleChange);
+    $('#sd_prompt_generation_history').on('input', onPromptGenerationHistoryInput);
     $('#sd_clip_skip').on('input', onClipSkipInput);
     $('#sd_seed').on('input', onSeedInput);
     $('#sd_character_prompt_share').on('input', onCharacterPromptShareInput);

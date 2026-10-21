@@ -13,7 +13,7 @@ Despite the historical repository name, this is no longer only an “ordered pro
 - Tagged reference-image library with automatic LLM selection and `%reference_image%` ComfyUI workflow injection.
 - Editable generated-image prompts: edit the image message, then swipe right to generate from the revised prompt.
 - Per-workflow model, text-encoder, VAE, and LoRA selections, configurable LoRA strength, custom placeholders, and an integrated workflow editor.
-- Connection Manager profile selection for routing the image-prompt step through a cheaper LLM while preserving full chat context and restoring the previous chat profile afterward.
+- Connection Manager profile selection for routing the image-prompt step through a cheaper LLM with the recent chat context, restoring the previous chat profile afterward.
 - Custom image-wand entries and the extended Image Generation settings UI.
 - Bounded and cached ComfyUI discovery for models, text encoders, samplers, schedulers, VAEs, and LoRAs, including compatible custom loader nodes.
 
@@ -140,14 +140,16 @@ For manual setup, copy the example JSON into `<user-data>/user/workflows/`, choo
 
 ## Image-prompt cost routing
 
-Choose **Prompt generation connection profile** to use another LLM for the text-to-image prompt step. The extension still uses SillyTavern's chat-aware generation pipeline and full context. It temporarily activates the selected profile, waits for it to connect, generates the prompt, and restores the prior profile. Leave the selector empty to use the active chat model.
+Choose **Prompt generation connection profile** to use another LLM for the text-to-image prompt step. The extension still uses SillyTavern's chat-aware generation pipeline. It temporarily activates the selected profile, waits for it to connect, generates the prompt, and restores the prior profile. Leave the selector empty to use the active chat model.
+
+**Chat messages for another model** (default 10) limits the chat history of that request when its profile can't reuse the chat's prompt cache, because it uses another model, preset or endpoint than the chat's active profile. A request to an uncached model pays the full input price for every message it carries, and the image prompt mostly needs the current scene. The request keeps the last 10 to 19 messages: the cut moves forward 10 messages at a time, so image prompts made in between (image swipes, an image for each new message) share their start and reuse the image model's own prompt cache. Everything outside the chat history stays, such as the system prompt, the character card, the persona, a summary and world info. When the profile goes to the chat's own model with the same settings, or no profile is selected, the request carries the whole chat like a normal reply, so it reuses the chat's cache. Set it to 0 to always send the whole chat.
 
 **Image prompt request sent as** controls where that request goes in the LLM prompt:
 
 - **Instruction (quiet prompt)**, the default, uses SillyTavern's quiet prompt. It is the last message of the request, after the post-history instructions, with the system role (the system sequence in instruct mode).
 - **System message** and **User message** insert the request after the latest chat message (depth 0) with that role, before the post-history instructions.
 
-In all three, the chat history before the request is identical to a normal reply, so provider prompt caches stay usable. The exception is providers that move every system message to the start of the prompt, such as Gemini through OpenRouter. There, the system-role options change the start of the prompt and the cached history is lost. Use **User message** for those models, or set the connection profile's Prompt Post-Processing to **Semi-strict**, which sends every system message after the first as a user message.
+In all three, a request that carries the whole chat has the same history before it as a normal reply, so provider prompt caches stay usable. The exception is providers that move every system message to the start of the prompt, such as Gemini through OpenRouter. There, the system-role options change the start of the prompt and the cached history is lost. Use **User message** for those models, or set the connection profile's Prompt Post-Processing to **Semi-strict**, which sends every system message after the first as a user message.
 
 ## Compatibility and development
 

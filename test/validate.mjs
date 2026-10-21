@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url)));
 assert.equal(manifest.generate_interceptor, 'SD_ProcessTriggers');
-for (const file of [manifest.js, manifest.css, 'comfy-defaults.js', 'settings.html', 'button.html', 'dropdown.html', 'README.md', 'LICENSE', 'examples/Krea2_Turbo_Managed_RunPod.json', 'scripts/setup-krea2.mjs']) assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), file);
+for (const file of [manifest.js, manifest.css, 'comfy-defaults.js', 'prompt-history.js', 'settings.html', 'button.html', 'dropdown.html', 'README.md', 'LICENSE', 'examples/Krea2_Turbo_Managed_RunPod.json', 'scripts/setup-krea2.mjs']) assert.ok(fs.existsSync(new URL(`../${file}`, import.meta.url)), file);
 assert.ok(fs.existsSync(new URL('../server/index.mjs', import.meta.url)), 'server/index.mjs');
 
 const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
